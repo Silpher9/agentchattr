@@ -568,7 +568,7 @@ main#timeline {
     display: flex;
     align-items: baseline;
     gap: 8px;
-    margin-bottom: 2px;
+    margin-bottom: 6px;
 }
 
 .message.self .msg-sender {
@@ -2022,6 +2022,164 @@ pre:hover .code-copy-btn { opacity: 1; }
 
 .agent-name-confirm:hover {
     opacity: 0.85;
+}
+
+/* --- Agent Roles --- */
+
+.agent-role-section {
+    margin-top: 14px;
+}
+
+.agent-role-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+
+.agent-role-presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 8px;
+}
+
+.role-preset-chip {
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-dim);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: inherit;
+}
+
+.role-preset-chip:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text);
+}
+
+.role-preset-chip.active {
+    background: var(--agent-color, var(--accent));
+    color: #fff;
+    border-color: transparent;
+}
+
+.agent-role-input {
+    width: 100%;
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(0, 0, 0, 0.2);
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.2s;
+    box-sizing: border-box;
+    font-family: inherit;
+}
+
+.agent-role-input:focus {
+    border-color: var(--agent-color, var(--accent));
+}
+
+.role-tag {
+    margin-left: 4px;
+    font-size: 11px;
+    opacity: 0.7;
+}
+
+/* --- Bubble role pill (top-right of message, left of copy) --- */
+
+.bubble-role {
+    position: relative;
+    background: none;
+    border: none;
+    padding: 0;
+    border-radius: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+    cursor: pointer;
+    opacity: 0;
+    max-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    order: 1;
+    transition: opacity 0.15s, background 0.15s, max-width 0.2s ease, padding 0.2s ease;
+    line-height: 1;
+}
+
+.bubble-role.has-role {
+    opacity: 0.7;
+    max-width: 120px;
+    padding: 1px 6px;
+    overflow: visible;
+    order: 0;
+    background: color-mix(in srgb, var(--bubble-color, var(--text-dim)) 15%, transparent);
+    color: var(--bubble-color, var(--text-dim));
+}
+
+.message:hover .bubble-role { opacity: 0.4; max-width: 120px; padding: 1px 6px; color: var(--bubble-color, var(--text-dim)); }
+.message:hover .bubble-role.has-role { opacity: 0.7; }
+.bubble-role:hover { opacity: 1 !important; background: color-mix(in srgb, var(--bubble-color, var(--text-dim)) 25%, transparent); }
+
+/* --- Bubble role picker popup --- */
+
+.bubble-role-picker {
+    position: absolute;
+    background: var(--bg-header);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 6px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    z-index: 100;
+    max-width: 280px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    animation: picker-in 0.1s ease-out;
+}
+
+@keyframes picker-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.bubble-role-picker .role-preset-chip {
+    padding: 3px 8px;
+    font-size: 11px;
+    border-radius: 10px;
+}
+
+.bubble-role-custom {
+    width: 100%;
+    margin-top: 2px;
+}
+
+.bubble-role-input {
+    width: 100%;
+    padding: 4px 8px;
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(0, 0, 0, 0.2);
+    color: var(--text);
+    font-size: 11px;
+    font-family: inherit;
+    outline: none;
+    box-sizing: border-box;
+}
+
+.bubble-role-input:focus {
+    border-color: var(--accent);
+}
+
+.bubble-role-input::placeholder {
+    color: var(--text-dim);
 }
 
 /* --- Footer / Input --- */

@@ -174,7 +174,7 @@ def _install_security_middleware(token: str, cfg: dict):
             # Static assets, index page, and uploaded images are public.
             # The index page injects the token client-side via same-origin script.
             # Uploads use random filenames and have path-traversal protection.
-            if path == "/" or path.startswith(("/static/", "/uploads/", "/api/heartbeat/", "/api/register", "/api/deregister/")):
+            if path == "/" or path.startswith(("/static/", "/uploads/", "/api/heartbeat/", "/api/register", "/api/deregister/", "/api/roles")):
                 return await call_next(request)
 
             # --- Origin check (blocks cross-origin / DNS-rebinding attacks) ---
@@ -1133,6 +1133,27 @@ async def delete_hat(agent_name: str):
     """Remove an agent's hat (called by the trash-can UI)."""
     clear_agent_hat(agent_name)
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/roles")
+async def get_roles():
+    """Get all agent roles."""
+    import mcp_bridge
+    return mcp_bridge.get_all_roles()
+
+
+@app.post("/api/roles/{agent_name}")
+async def set_agent_role(agent_name: str, request: Request):
+    """Set or clear an agent's role."""
+    import mcp_bridge
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json"}, status_code=400)
+    role = body.get("role", "").strip()
+    mcp_bridge.set_role(agent_name, role)
+    await broadcast_status()
+    return JSONResponse({"ok": True, "role": role})
 
 
 @app.post("/api/register")

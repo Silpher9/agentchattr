@@ -156,6 +156,7 @@ function init() {
     });
 
     detectPlatform();
+    fetchRoles();
     connectWebSocket();
     setupInput();
     setupDragDrop();
@@ -563,7 +564,10 @@ function appendMessage(msg) {
 
         const statusLabel = todoStatusLabel(todoStatus);
         el.dataset.rawText = msg.text;
-        el.innerHTML = `<div class="todo-strip"></div>${isSelf ? '' : avatarHtml}<div class="chat-bubble" style="--bubble-color: ${senderColor}">${replyHtml}<div class="bubble-header"><span class="msg-sender" style="color: ${senderColor}">${escapeHtml(msg.sender)}</span><span class="msg-time">${msg.time || ''}</span></div><div class="msg-text">${textHtml}</div>${attachmentsHtml}<button class="bubble-copy" onclick="copyMessage(${msg.id}, event)" title="Copy message"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div><div class="msg-actions"><button class="reply-btn" onclick="startReply(${msg.id}, event)">reply</button><button class="todo-hint" onclick="todoCycle(${msg.id}); event.stopPropagation();">${statusLabel}</button><button class="delete-btn" onclick="deleteClick(${msg.id}, event)" title="Delete">del</button></div>`;
+        const senderRole = _agentRoles[msg.sender] || '';
+        const roleClass = senderRole ? 'bubble-role has-role' : 'bubble-role';
+        const rolePillHtml = !isSelf ? `<button class="${roleClass}" onclick="showBubbleRolePicker(this, '${escapeHtml(msg.sender)}')" title="${senderRole ? escapeHtml(senderRole) : 'Set role'}">${senderRole || 'choose a role'}</button>` : '';
+        el.innerHTML = `<div class="todo-strip"></div>${isSelf ? '' : avatarHtml}<div class="chat-bubble" style="--bubble-color: ${senderColor}">${replyHtml}<div class="bubble-header"><span class="msg-sender" style="color: ${senderColor}">${escapeHtml(msg.sender)}</span>${rolePillHtml}<span class="msg-time">${msg.time || ''}</span></div><div class="msg-text">${textHtml}</div>${attachmentsHtml}<button class="bubble-copy" onclick="copyMessage(${msg.id}, event)" title="Copy message"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button></div><div class="msg-actions"><button class="reply-btn" onclick="startReply(${msg.id}, event)">reply</button><button class="todo-hint" onclick="todoCycle(${msg.id}); event.stopPropagation();">${statusLabel}</button><button class="delete-btn" onclick="deleteClick(${msg.id}, event)" title="Delete">del</button></div>`;
         if (todoStatus) el.classList.add('msg-todo', `msg-todo-${todoStatus}`);
 
         // Add copy buttons to code blocks
@@ -984,7 +988,141 @@ function _closeAgentNameModal() {
     setTimeout(_showNextPendingName, 200);
 }
 
+// --- Bubble role picker ---
+
+function showBubbleRolePicker(btn, agentName) {
+    // Close any existing picker and reset z-index on its parent message
+    document.querySelectorAll('.bubble-role-picker').forEach(p => {
+        const msg = p.closest('.message');
+        if (msg) msg.style.zIndex = '';
+        p.remove();
+    });
+
+    const ROLE_PRESETS = [
+        { label: 'Planner', emoji: '📋' },
+        { label: 'Builder', emoji: '🔨' },
+        { label: 'Reviewer', emoji: '🔍' },
+        { label: 'Researcher', emoji: '🔬' },
+        { label: 'Chaos Gremlin', emoji: '😈' },
+        { label: 'Heckler', emoji: '🤡' },
+        { label: 'Hype', emoji: '🎉' },
+    ];
+
+    const currentRole = (_agentRoles[agentName] || '').toLowerCase();
+    const picker = document.createElement('div');
+    picker.className = 'bubble-role-picker';
+    const closePicker = () => { if (msgEl) msgEl.style.zIndex = ''; picker.remove(); };
+
+    // None chip
+    const noneChip = document.createElement('button');
+    noneChip.className = 'role-preset-chip' + (!currentRole ? ' active' : '');
+    noneChip.textContent = 'None';
+    noneChip.addEventListener('click', () => { _setRole(agentName, ''); closePicker(); });
+    picker.appendChild(noneChip);
+
+    for (const preset of ROLE_PRESETS) {
+        const chip = document.createElement('button');
+        chip.className = 'role-preset-chip' + (currentRole === preset.label.toLowerCase() ? ' active' : '');
+        chip.textContent = `${preset.emoji} ${preset.label}`;
+        chip.addEventListener('click', () => { _setRole(agentName, preset.label); closePicker(); });
+        picker.appendChild(chip);
+    }
+
+    // Custom text input
+    const customRow = document.createElement('div');
+    customRow.className = 'bubble-role-custom';
+    const customInput = document.createElement('input');
+    customInput.type = 'text';
+    customInput.className = 'bubble-role-input';
+    customInput.placeholder = 'Custom...';
+    customInput.maxLength = 30;
+    customInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            const val = customInput.value.trim();
+            if (val) { _setRole(agentName, val); closePicker(); }
+            e.preventDefault();
+        }
+        if (e.key === 'Escape') { closePicker(); }
+    });
+    customRow.appendChild(customInput);
+    picker.appendChild(customRow);
+
+    // Place inside the chat-bubble, positioned below the clicked button
+    const bubble = btn.closest('.chat-bubble');
+    const msgEl = btn.closest('.message');
+    if (msgEl) msgEl.style.zIndex = '50';
+    bubble.appendChild(picker);
+
+    // Position picker below the button that was clicked
+    requestAnimationFrame(() => {
+        const btnRect = btn.getBoundingClientRect();
+        const bubbleRect = bubble.getBoundingClientRect();
+        picker.style.top = (btnRect.bottom - bubbleRect.top + 4) + 'px';
+        picker.style.left = (btnRect.left - bubbleRect.left) + 'px';
+        picker.style.right = 'auto';
+
+        // Flip upward if picker would overflow below the footer/viewport
+        const pickerRect = picker.getBoundingClientRect();
+        const footerEl = document.querySelector('footer');
+        const maxBottom = footerEl ? footerEl.getBoundingClientRect().top : window.innerHeight - 20;
+        if (pickerRect.bottom > maxBottom) {
+            picker.style.top = 'auto';
+            picker.style.bottom = (bubbleRect.bottom - btnRect.top + 4) + 'px';
+        }
+        // Nudge left if overflowing right edge
+        if (pickerRect.right > window.innerWidth - 10) {
+            picker.style.left = 'auto';
+            picker.style.right = '0';
+        }
+    });
+
+    // Close on outside click (next tick to avoid catching the current click)
+    setTimeout(() => {
+        const closeHandler = (e) => {
+            if (!picker.contains(e.target)) {
+                closePicker();
+                document.removeEventListener('click', closeHandler, true);
+            }
+        };
+        document.addEventListener('click', closeHandler, true);
+    }, 0);
+}
+
+function _setRole(agentName, role) {
+    fetch(`/api/roles/${agentName}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Session-Token': SESSION_TOKEN },
+        body: JSON.stringify({ role }),
+    });
+    // Optimistic update
+    _agentRoles[agentName] = role;
+    // Update all bubble-role buttons for this sender
+    const pillText = role || 'choose a role';
+    document.querySelectorAll('.message').forEach(msg => {
+        const senderEl = msg.querySelector('.msg-sender');
+        const btn = msg.querySelector('.bubble-role');
+        if (btn && senderEl && senderEl.textContent === agentName) {
+            btn.textContent = pillText;
+            btn.title = role || 'Set role';
+            btn.classList.toggle('has-role', !!role);
+        }
+    });
+}
+
 // --- Status ---
+
+const _agentRoles = {};  // name → role string
+
+function fetchRoles() {
+    fetch('/api/roles').then(r => r.json()).then(roles => {
+        Object.assign(_agentRoles, roles);
+    }).catch(() => {});
+}
+
+const _ROLE_EMOJI = {
+    'planner': '📋', 'builder': '🔨', 'reviewer': '🔍', 'researcher': '🔬',
+    'chaos gremlin': '😈', 'heckler': '🤡', 'hype': '🎉',
+};
 
 function updateStatus(data) {
     for (const [name, info] of Object.entries(data)) {
@@ -1006,6 +1144,11 @@ function updateStatus(data) {
 
         // Keep agent color in sync
         if (info.color) pill.style.setProperty('--agent-color', info.color);
+
+        // Track role (displayed on bubbles, not on pill)
+        if (info.role !== undefined) {
+            _agentRoles[name] = info.role;
+        }
     }
 }
 

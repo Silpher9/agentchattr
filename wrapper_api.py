@@ -151,6 +151,21 @@ def main():
 
     threading.Thread(target=_heartbeat, daemon=True).start()
 
+    # Get this agent's role from server status
+    def get_my_role():
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{server_port}/api/status",
+                headers=_auth_headers(get_token()),
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                status = json.loads(resp.read())
+            my_name = get_name()
+            info = status.get(my_name, {})
+            return info.get("role", "") if isinstance(info, dict) else ""
+        except Exception:
+            return ""
+
     # Get online agents from server
     def get_online_agents():
         try:
@@ -211,10 +226,14 @@ def main():
     def format_messages(chat_msgs):
         my_name = get_name()
 
-        # Build dynamic system prompt with online status and mention instructions
+        # Build dynamic system prompt with online status, role, and mention instructions
         online = get_online_agents()
         others = [n for n in online if n != my_name]
         parts = [system_prompt]
+        # Inject role if set
+        my_role = get_my_role()
+        if my_role:
+            parts.append(f"role: {my_role}")
         if others:
             parts.append(f"Currently online: {', '.join(others)}.")
             parts.append("To mention another agent and trigger them to respond, "

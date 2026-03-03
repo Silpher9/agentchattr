@@ -193,7 +193,20 @@ _IDENTITY_HINT = (
 )
 
 
-def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = False, trigger_flag=None):
+def _fetch_role(server_port: int, agent_name: str) -> str:
+    """Fetch this agent's role from the server status endpoint."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"http://127.0.0.1:{server_port}/api/roles")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            roles = json.loads(resp.read())
+        return roles.get(agent_name, "")
+    except Exception:
+        return ""
+
+
+def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = False, trigger_flag=None,
+                   server_port: int = 8300, agent_name: str = ""):
     """Poll queue file and inject an MCP read task when triggered."""
     first_mention = True
     while True:
@@ -224,6 +237,10 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                         trigger_flag[0] = True
                     time.sleep(0.5)
                     prompt = f"mcp read #{channel} - you were mentioned, take appropriate action"
+                    # Append role if set
+                    role = _fetch_role(server_port, agent_name)
+                    if role:
+                        prompt += f" - your role: {role}"
                     if first_mention and is_multi_instance:
                         prompt += _IDENTITY_HINT
                         first_mention = False
@@ -448,7 +465,8 @@ def main():
         _watcher_thread = threading.Thread(
             target=_queue_watcher,
             args=(get_identity, inject_fn),
-            kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag},
+            kwargs={"is_multi_instance": _is_multi_instance, "trigger_flag": _trigger_flag,
+                    "server_port": server_port, "agent_name": assigned_name},
             daemon=True,
         )
         _watcher_thread.start()

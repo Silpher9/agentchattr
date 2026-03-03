@@ -32,6 +32,10 @@ _cursors: dict[str, dict[str, int]] = {}  # agent_name → {channel_name → las
 _cursors_lock = threading.Lock()
 PRESENCE_TIMEOUT = 10  # ~2 missed heartbeats (5s interval) = offline
 
+# Roles — per-instance, persisted to roles.json
+_roles: dict[str, str] = {}  # agent_name → role string
+_ROLES_FILE: Path | None = None
+
 # Cursor persistence — set by run.py to enable saving cursors across restarts
 _CURSORS_FILE: Path | None = None
 
@@ -258,8 +262,51 @@ def _save_cursors():
         log.warning("Failed to save cursor state to %s", _CURSORS_FILE)
 
 
+def _load_roles():
+    """Load persisted roles from disk."""
+    global _roles
+    if _ROLES_FILE is None or not _ROLES_FILE.exists():
+        return
+    try:
+        _roles = json.loads(_ROLES_FILE.read_text("utf-8"))
+    except Exception:
+        log.warning("Failed to load roles from %s", _ROLES_FILE)
+
+
+def _save_roles():
+    """Persist roles to disk atomically."""
+    if _ROLES_FILE is None:
+        return
+    try:
+        _ROLES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = _ROLES_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(_roles), "utf-8")
+        os.replace(tmp, _ROLES_FILE)
+    except Exception:
+        log.warning("Failed to save roles to %s", _ROLES_FILE)
+
+
+def set_role(name: str, role: str):
+    """Set or clear an agent's role. Empty string clears."""
+    if role:
+        _roles[name] = role
+    else:
+        _roles.pop(name, None)
+    _save_roles()
+
+
+def get_role(name: str) -> str:
+    """Get an agent's current role, or empty string."""
+    return _roles.get(name, "")
+
+
+def get_all_roles() -> dict[str, str]:
+    """All active roles."""
+    return dict(_roles)
+
+
 def migrate_identity(old_name: str, new_name: str):
-    """Migrate all runtime state when an agent is renamed (presence, cursors, activity)."""
+    """Migrate all runtime state when an agent is renamed (presence, cursors, activity, roles)."""
     with _presence_lock:
         if old_name in _presence:
             _presence[new_name] = _presence.pop(old_name)
@@ -271,17 +318,23 @@ def migrate_identity(old_name: str, new_name: str):
     with _cursors_lock:
         if old_name in _cursors:
             _cursors[new_name] = _cursors.pop(old_name)
+    if old_name in _roles:
+        _roles[new_name] = _roles.pop(old_name)
+        _save_roles()
     _save_cursors()
 
 
 def purge_identity(name: str):
-    """Remove all runtime state for a deregistered agent (presence, activity, cursors)."""
+    """Remove all runtime state for a deregistered agent (presence, activity, cursors, roles)."""
     with _presence_lock:
         _presence.pop(name, None)
         _activity.pop(name, None)
         _activity_ts.pop(name, None)
     with _cursors_lock:
         _cursors.pop(name, None)
+    if name in _roles:
+        del _roles[name]
+        _save_roles()
     _save_cursors()
 
 
@@ -347,13 +400,14 @@ def chat_read(
     msgs = msgs[-limit:]
     _update_cursor(sender, msgs, ch)
     serialized = _serialize_messages(msgs)
-    # Prepend identity breadcrumb only when multi-instance is active for this family
+    # Prepend identity breadcrumb if multi-instance
     if sender and registry and registry.is_registered(sender):
-        if registry.family_instance_count(sender) >= 2:
+        multi = registry.family_instance_count(sender) >= 2
+        if multi:
             inst = registry.get_instance(sender)
             if inst:
                 breadcrumb = f"[identity: {inst['name']} | label: {inst['label']}]"
-                return f"{breadcrumb}\n{serialized}"
+                serialized = f"{breadcrumb}\n{serialized}"
     return serialized
 
 
@@ -375,7 +429,8 @@ def chat_resync(
     ch = channel if channel else None
     msgs = store.get_recent(limit, channel=ch)
     _update_cursor(sender, msgs, ch)
-    return _serialize_messages(msgs)
+    serialized = _serialize_messages(msgs)
+    return serialized
 
 
 def chat_join(name: str, channel: str = "general", ctx: Context | None = None) -> str:

@@ -44,10 +44,12 @@ def main():
     mcp_bridge.registry = registry
     mcp_bridge.config = config
 
-    # Enable cursor persistence across restarts
+    # Enable cursor and role persistence across restarts
     data_dir = ROOT / config.get("server", {}).get("data_dir", "./data")
     mcp_bridge._CURSORS_FILE = data_dir / "mcp_cursors.json"
     mcp_bridge._load_cursors()
+    mcp_bridge._ROLES_FILE = data_dir / "roles.json"
+    mcp_bridge._load_roles()
 
     # Start MCP servers in background threads
     http_port = config.get("mcp", {}).get("http_port", 8200)
