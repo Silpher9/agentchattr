@@ -1424,8 +1424,8 @@ function handleJobEvent(action, data) {
             markJobRead(data.job_id);
         } else if (!isSelfMessage) {
             jobUnread[data.job_id] = (jobUnread[data.job_id] || 0) + 1;
-            // Play soft pluck for messages in other job threads
-            if (window.soundEnabled && document.hasFocus() && window.playCrossChannelSound) {
+            // Play soft pluck for chat messages in other job threads
+            if (window.soundEnabled && document.hasFocus() && msgType === 'chat' && window.playCrossChannelSound) {
                 window.playCrossChannelSound();
             }
         }

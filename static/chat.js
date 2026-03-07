@@ -112,7 +112,7 @@ function buildSoundSettings() {
         const label = document.createElement('span');
         label.className = 'sound-label';
         label.textContent = name === 'default' ? 'Default sound'
-            : name === 'cross-channel' ? 'Other channels'
+            : name === 'cross-channel' ? 'Background alerts'
             : (agentConfig[name]?.label || name);
         const select = document.createElement('select');
         select.className = 'sound-select';
@@ -735,8 +735,8 @@ function appendMessage(msg) {
         if (soundEnabled && msg.type !== 'join' && msg.type !== 'leave') {
             channelUnread[msgChannel] = (channelUnread[msgChannel] || 0) + 1;
             renderChannelTabs();
-            // Play soft pluck for cross-channel messages from others (only when focused)
-            if (document.hasFocus() && msg.sender && msg.sender.toLowerCase() !== username.toLowerCase()) {
+            // Play soft pluck for cross-channel chat messages from others (only when focused)
+            if (document.hasFocus() && msg.type === 'chat' && msg.sender && msg.sender.toLowerCase() !== username.toLowerCase()) {
                 playCrossChannelSound();
             }
         }
