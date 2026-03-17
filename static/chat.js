@@ -263,8 +263,19 @@ function renderMarkdown(text) {
     });
     // Unescape literal \n and \t that agents sometimes send as escaped text
     text = text.replace(/\\\\n/g, '\n').replace(/\\n/g, '\n').replace(/\\t/g, '\t');
-    // Treat raw HTML as plain text so message bodies cannot break chat layout.
+    // Escape < and > outside of code blocks/inline code so raw HTML
+    // can't break layout or cause XSS, while preserving angle brackets
+    // inside backtick-delimited code where users expect them to render.
+    // Protect fenced code blocks and inline code by replacing them with placeholders
+    var codeSlots = [];
+    text = text.replace(/(```[\s\S]*?```|`[^`\n]+`)/g, function(match) {
+        codeSlots.push(match);
+        return '\x00C' + (codeSlots.length - 1) + '\x00';
+    });
+    // Escape angle brackets in non-code text only
     text = text.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Restore code blocks (angle brackets inside them stay unescaped)
+    text = text.replace(/\x00C(\d+)\x00/g, function(_, i) { return codeSlots[parseInt(i)]; });
     // Restore paths
     text = text.replace(/\x00P(\d+)\x00/g, (_, i) => pathSlots[parseInt(i)]);
     // Parse markdown, then color @mentions, URLs, and file paths in the output
