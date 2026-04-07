@@ -94,11 +94,13 @@ Create a `config.local.toml` file in the agentchattr root directory (this file i
 host = "100.64.x.x"  # Replace with your Tailscale IP from step 1
 ```
 
-This tells agentchattr to bind on your Tailscale IP instead of localhost.
+This tells agentchattr which host to accept connections from. The server will bind on all interfaces (`0.0.0.0`) so that both local agent wrappers (via localhost) and your phone (via Tailscale IP) can connect. The origin allowlist restricts browser access to only localhost and this specific Tailscale IP.
 
 > **Why config.local.toml?** This file is gitignored, so your personal network settings won't be committed to the repository. The main `config.toml` stays unchanged.
 
-> **Why not 0.0.0.0?** Binding to `0.0.0.0` exposes agentchattr on *all* network interfaces, including your local WiFi. Binding to the Tailscale IP specifically ensures only Tailscale traffic can reach it.
+> **Why not `host = "0.0.0.0"`?** Setting host to `0.0.0.0` is explicitly rejected — it breaks origin-based security checks because browsers never send `0.0.0.0` as their origin. Always use your specific Tailscale IP.
+
+> **Security note:** While the server listens on all interfaces, the origin allowlist only accepts requests from `localhost` and your configured Tailscale IP. Combined with the session token requirement, this means only authorized devices on your tailnet can access the UI.
 
 ---
 

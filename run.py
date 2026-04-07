@@ -123,6 +123,14 @@ def main():
     host = config.get("server", {}).get("host", "127.0.0.1")
     port = config.get("server", {}).get("port", 8300)
 
+    # --- Reject 0.0.0.0 as explicit config value ---
+    if host == "0.0.0.0":
+        print("\n  !! CONFIGURATION ERROR — host cannot be 0.0.0.0 !!")
+        print("  Set host to your specific Tailscale IP (e.g. 100.64.x.x)")
+        print("  instead of 0.0.0.0, which exposes all network interfaces")
+        print("  and breaks origin-based security checks.\n")
+        sys.exit(1)
+
     # --- Security: warn if binding to a non-localhost address ---
     if host not in ("127.0.0.1", "localhost", "::1"):
         print(f"\n  !! SECURITY WARNING — binding to {host} !!")
@@ -155,7 +163,11 @@ def main():
     print(f"  Agents auto-trigger on @mention")
     print(f"\n  Session token: {session_token}\n")
 
-    uvicorn.run(app, host=host, port=port, log_level="info")
+    # Bind to 0.0.0.0 when host is a network address (e.g. Tailscale IP),
+    # so wrappers can still connect via localhost while mobile connects via Tailscale.
+    # The origin allowlist in app.py restricts which origins are actually accepted.
+    bind_addr = "0.0.0.0" if host not in ("127.0.0.1", "localhost", "::1") else host
+    uvicorn.run(app, host=bind_addr, port=port, log_level="info")
 
 
 if __name__ == "__main__":
