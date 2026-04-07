@@ -4746,10 +4746,8 @@ footer {
         min-height: 44px;
     }
 
-    /* Hide less-used header buttons on phone */
-    #help-btn,
-    #pins-toggle,
-    #launch-toggle {
+    /* Compact less-used header buttons on phone (keep accessible) */
+    #help-btn {
         display: none;
     }
 

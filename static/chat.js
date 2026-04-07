@@ -4144,10 +4144,11 @@ function initMobileViewport() {
 
         if (keyboardOpen) {
             // Offset footer so it stays above the keyboard
-            const offset = window.innerHeight - vv.height;
-            footer.style.transform = `translateY(-${offset}px)`;
+            // Account for vv.offsetTop (iOS address bar shifts)
+            const offset = window.innerHeight - vv.height - vv.offsetTop;
+            footer.style.transform = `translateY(-${Math.max(0, offset)}px)`;
             // Shrink timeline to account for keyboard
-            timeline.style.paddingBottom = offset + 'px';
+            timeline.style.paddingBottom = Math.max(0, offset) + 'px';
         } else {
             footer.style.transform = '';
             timeline.style.paddingBottom = '';
