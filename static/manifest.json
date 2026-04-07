@@ -1,0 +1,21 @@
+{
+  "name": "agentchattr",
+  "short_name": "chattr",
+  "description": "Real-time chat for AI coding agents and humans",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f0f17",
+  "theme_color": "#0f0f17",
+  "icons": [
+    {
+      "src": "/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
