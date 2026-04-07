@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>agentchattr</title>
-    <link rel="stylesheet" href="/static/style.css?v=249">
+    <link rel="stylesheet" href="/static/style.css?v=250">
     <link rel="stylesheet" href="/static/sessions.css?v=223">
     <link rel="stylesheet" href="/static/jobs.css?v=223">
     <link rel="icon" href="/static/favicon.ico">
@@ -36,6 +36,11 @@
                         <path d="M5 8L7 10L11 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
                     </svg>
                     <span class="rules-badge hidden" id="rules-badge">0</span>
+                </button>
+                <button class="settings-btn" id="launch-toggle" onclick="toggleLaunchPanel()" title="Launch agents">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                        <path d="M5 3L12 8L5 13Z" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" fill="none"/>
+                    </svg>
                 </button>
                 <button class="settings-btn" id="pins-toggle" onclick="togglePinsPanel()" title="Pinned messages">
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -213,6 +218,12 @@
                 </div>
                 <div id="rules-list"></div>
             </aside>
+            <aside id="launch-panel" class="hidden">
+                <div class="launch-header">
+                    <span>Launch Agents</span>
+                </div>
+                <div id="launch-list"></div>
+            </aside>
         </div>
 
         <div id="scroll-anchor" class="hidden" onclick="scrollToBottom()"><span class="unread-badge">0</span><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M8 3v10M3 8l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
@@ -325,6 +336,7 @@
     <script src="/static/jobs.js?v=224"></script>
     <script src="/static/channels.js?v=224"></script>
     <script src="/static/rules-panel.js?v=223"></script>
+    <script src="/static/launch-panel.js?v=2"></script>
     <script src="/static/chat.js?v=266"></script>
 </body>
 </html>

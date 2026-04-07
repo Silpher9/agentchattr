@@ -167,7 +167,12 @@ function renderRulesPanel() {
 
     const normalize = (s) => s === 'proposed' ? 'draft' : (s === 'approved' ? 'active' : (s || 'draft'));
     // Filter out pending rules — they only exist as proposal cards in the timeline
-    const panelRules = rules.filter(r => r.status !== 'pending');
+    // Show rules scoped to the active channel + global rules (channel == null/undefined)
+    const ch = window.activeChannel || 'general';
+    const panelRules = rules.filter(r =>
+        r.status !== 'pending' &&
+        (r.channel == null || r.channel === ch)
+    );
     const activeCount = panelRules.filter(r => normalize(r.status) === 'active').length;
 
     // Update header counter
@@ -292,10 +297,14 @@ function renderRulesPanel() {
 
             const displayStatus = normalize(d.status);
 
+            const channelBadge = d.channel == null
+                ? '<span class="rule-channel-badge global">Global</span>'
+                : `<span class="rule-channel-badge">#${window.escapeHtml(d.channel)}</span>`;
             card.innerHTML = `
                 <div class="rule-card-header">
                     <span class="rule-status-dot ${displayStatus}"></span>
                     <div class="rule-text">${window.escapeHtml(d.text || d.decision || '')}</div>
+                    ${channelBadge}
                 </div>
             `;
             itemsInner.appendChild(card);
@@ -376,10 +385,21 @@ function showCreateRule() {
     const existing = list.querySelector('.job-create-form');
     if (existing) { existing.remove(); return; }
 
+    const ch = window.activeChannel || 'general';
     const form = document.createElement('div');
     form.className = 'job-create-form';
     form.innerHTML = `
         <input type="text" placeholder="Write a short rule agents should follow" class="rule-create-text" maxlength="160" autofocus>
+        <div class="rule-channel-selector">
+            <label class="rule-channel-option">
+                <input type="radio" name="rule-channel" value="${window.escapeHtml(ch)}" checked>
+                <span>#${window.escapeHtml(ch)}</span>
+            </label>
+            <label class="rule-channel-option">
+                <input type="radio" name="rule-channel" value="">
+                <span>Global</span>
+            </label>
+        </div>
         <div class="job-create-actions">
             <button class="cancel-btn" onclick="this.closest('.job-create-form').remove()">Cancel</button>
             <button class="create-btn" onclick="submitCreateRule(this)">Create</button>
@@ -404,11 +424,14 @@ function submitCreateRule(btn) {
     const text = (textInput.value || '').trim();
     if (!text) { textInput.focus(); return; }
 
+    const channelRadio = form.querySelector('input[name="rule-channel"]:checked');
+    const channel = channelRadio ? channelRadio.value || null : window.activeChannel;
+
     window.ws.send(JSON.stringify({
         type: 'rule_propose',
         text: text,
         author: window.username,
-        channel: window.activeChannel,
+        channel: channel,
     }));
     form.remove();
 }
@@ -434,12 +457,24 @@ function editRule(id) {
     if (!card || card.classList.contains('editing')) return;
     card.classList.add('editing');
 
+    const channels = window.channelList || ['general'];
+    const currentChannel = d.channel;
+    const channelOptions = [
+        `<option value=""${currentChannel == null ? ' selected' : ''}>Global</option>`,
+        ...channels.map(ch =>
+            `<option value="${window.escapeHtml(ch)}"${currentChannel === ch ? ' selected' : ''}>#${window.escapeHtml(ch)}</option>`
+        ),
+    ].join('');
+
     const editArea = document.createElement('div');
     editArea.className = 'rule-edit-area';
     editArea.onclick = (e) => e.stopPropagation();
     editArea.innerHTML = `
         <textarea class="rule-edit-field" maxlength="${RULE_MAX_CHARS}" rows="1" data-limit="${RULE_MAX_CHARS}">${window.escapeHtml(d.text || '')}</textarea>
         <div class="char-counter">${(d.text || '').length}/${RULE_MAX_CHARS}</div>
+        <div class="rule-edit-channel">
+            <label>Channel: <select class="rule-channel-select">${channelOptions}</select></label>
+        </div>
         <div class="rule-edit-actions">
             <button class="save-btn" onclick="event.stopPropagation();saveRuleEdit(${id})">Save</button>
             <button class="cancel-btn" onclick="event.stopPropagation();cancelRuleEdit(${id})">Cancel</button>
@@ -478,11 +513,12 @@ function saveRuleEdit(id) {
 
     if (!newText) return;
 
-    window.ws.send(JSON.stringify({
-        type: 'rule_edit',
-        id,
-        text: newText,
-    }));
+    const channelSelect = card.querySelector('.rule-channel-select');
+    const channel = channelSelect ? (channelSelect.value || null) : undefined;
+
+    const msg = { type: 'rule_edit', id, text: newText };
+    if (channel !== undefined) msg.channel = channel;
+    window.ws.send(JSON.stringify(msg));
 }
 
 function cancelRuleEdit(id) {

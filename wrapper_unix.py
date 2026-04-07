@@ -93,6 +93,7 @@ def run_agent(
     session_name=None,
     inject_env=None,
     inject_delay: float = 0.3,
+    headless: bool = False,
 ):
     """Run agent inside a tmux session, inject via tmux send-keys."""
     _check_tmux()
@@ -147,26 +148,35 @@ def run_agent(
                 print(f"  Error: failed to create tmux session (exit {result.returncode})")
                 break
 
-            # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
-            subprocess.run(["tmux", "attach-session", "-t", session_name])
-
-            # Check: did the agent exit, or did the user just detach?
-            if _session_exists(session_name):
-                # Session still alive — user detached, agent running in background.
-                # Keep the wrapper alive so the local proxy and heartbeats survive.
-                print(f"\n  Detached. {agent.capitalize()} still running in tmux.")
-                print(f"  Reattach: tmux attach -t {session_name}")
+            if headless:
+                # Headless mode: don't attach, just keep wrapper alive
+                # so heartbeats, queue watcher, activity monitor, and
+                # MCP proxy continue running.
+                print(f"  Headless mode — wrapper staying alive for background services.")
                 while _session_exists(session_name):
                     time.sleep(1)
                 break
+            else:
+                # Attach — blocks until agent exits or user detaches (Ctrl+B, D)
+                subprocess.run(["tmux", "attach-session", "-t", session_name])
 
-            # Session gone — agent exited
-            if no_restart:
-                break
+                # Check: did the agent exit, or did the user just detach?
+                if _session_exists(session_name):
+                    # Session still alive — user detached, agent running in background.
+                    # Keep the wrapper alive so the local proxy and heartbeats survive.
+                    print(f"\n  Detached. {agent.capitalize()} still running in tmux.")
+                    print(f"  Reattach: tmux attach -t {session_name}")
+                    while _session_exists(session_name):
+                        time.sleep(1)
+                    break
 
-            print(f"\n  {agent.capitalize()} exited.")
-            print(f"  Restarting in 3s... (Ctrl+C to quit)")
-            time.sleep(3)
+                # Session gone — agent exited
+                if no_restart:
+                    break
+
+                print(f"\n  {agent.capitalize()} exited.")
+                print(f"  Restarting in 3s... (Ctrl+C to quit)")
+                time.sleep(3)
         except KeyboardInterrupt:
             # Kill the tmux session on Ctrl+C
             subprocess.run(

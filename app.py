@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re as _re
+import subprocess
 import sys
 import threading
 import uuid
@@ -42,6 +43,7 @@ session_store: SessionStore | None = None
 session_engine: SessionEngine | None = None
 config: dict = {}
 ws_clients: set[WebSocket] = set()
+_launched: dict[str, dict] = {}  # agent_base → {"proc": Popen, "mode": str}
 
 # --- Security: session token (set by configure()) ---
 session_token: str = ""
@@ -303,6 +305,7 @@ def configure(cfg: dict, session_token: str = ""):
     store.on_message(_on_store_message)
 
     _load_settings()
+    rules.set_channels(room_settings["channels"])
     _load_hats()
 
     # Apply saved loop guard setting
@@ -360,7 +363,7 @@ def configure(cfg: dict, session_token: str = ""):
 
                 # Crash timeout: if a wrapper hasn't heartbeated for 60s,
                 # it's dead — deregister it to free the slot.
-                _CRASH_TIMEOUT = 15
+                _CRASH_TIMEOUT = 60
                 registered = set(registry.get_all_names())
                 for name in registered:
                     with mcp_bridge._presence_lock:
@@ -1169,16 +1172,17 @@ async def websocket_endpoint(websocket: WebSocket):
                 text = text.strip()
                 author = event.get("author") or event.get("owner") or room_settings.get("username", "user")
                 reason = event.get("reason", "")
+                channel = event.get("channel", "general")
                 is_human = author.lower() == room_settings.get("username", "user").lower()
                 if text:
-                    rule = rules.propose(text, author, reason)
+                    rule = rules.propose(text, author, reason,
+                                         channel=channel if channel else None)
                     if rule:
                         if is_human:
                             # Human-created rules go straight to draft, no card
                             rules.make_draft(rule["id"])
                         else:
                             # Agent proposals get a card in the timeline
-                            channel = event.get("channel", "general")
                             msg = store.add(
                                 author, f"Rule proposal: {text}",
                                 msg_type="rule_proposal",
@@ -1210,11 +1214,13 @@ async def websocket_endpoint(websocket: WebSocket):
             elif event.get("type") in ("decision_edit", "rule_edit"):
                 rid = event.get("id")
                 if rid is not None:
-                    rules.edit(
-                        int(rid),
-                        text=event.get("text") or event.get("decision"),
-                        reason=event.get("reason"),
-                    )
+                    edit_kwargs = {
+                        "text": event.get("text") or event.get("decision"),
+                        "reason": event.get("reason"),
+                    }
+                    if "channel" in event:
+                        edit_kwargs["channel"] = event["channel"]
+                    rules.edit(int(rid), **edit_kwargs)
                 continue
 
             elif event.get("type") in ("decision_delete", "rule_delete"):
@@ -1354,6 +1360,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 if len(room_settings["channels"]) >= MAX_CHANNELS:
                     continue
                 room_settings["channels"].append(name)
+                rules.set_channels(room_settings["channels"])
                 _save_settings()
                 await broadcast_settings()
 
@@ -1371,6 +1378,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 idx = room_settings["channels"].index(old_name)
                 room_settings["channels"][idx] = new_name
                 store.rename_channel(old_name, new_name)
+                rules.rename_channel(old_name, new_name)
+                rules.set_channels(room_settings["channels"])
                 import mcp_bridge
                 mcp_bridge.migrate_cursors_rename(old_name, new_name)
                 _save_settings()
@@ -1395,6 +1404,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
                 room_settings["channels"].remove(name)
                 store.delete_channel(name)
+                rules.delete_channel(name)
+                rules.set_channels(room_settings["channels"])
                 import mcp_bridge
                 mcp_bridge.migrate_cursors_delete(name)
                 _save_settings()
@@ -2037,9 +2048,14 @@ async def get_rules():
 
 
 @app.get("/api/rules/active")
-async def get_active_rules():
-    """Get compact active rules for agent injection."""
-    data = rules.active_list()
+async def get_active_rules(request: Request):
+    """Get compact active rules for agent injection.
+
+    Pass ?channel=name to get only rules for that channel (channel-scoped + global).
+    Omit for all active rules (backward compat).
+    """
+    channel = request.query_params.get("channel") or None
+    data = rules.active_list(channel=channel)
     data["refresh_interval"] = room_settings.get("rules_refresh_interval", 10)
     return JSONResponse(data)
 
@@ -2609,3 +2625,414 @@ async def serve_upload(filename: str):
     if filepath.exists():
         return FileResponse(filepath)
     return JSONResponse({"error": "not found"}, status_code=404)
+
+
+# --- Launch Panel API ---
+
+import shutil as _shutil
+from provider_meta import get_auto_approve_flag
+
+_TMUX_SESSION_PREFIX = "agentchattr-"
+
+def _find_terminal() -> str | None:
+    """Find an available terminal emulator."""
+    for term in ("gnome-terminal", "xterm"):
+        if _shutil.which(term):
+            return term
+    return None
+
+
+def _tmux_session_name(instance_name: str) -> str:
+    return f"{_TMUX_SESSION_PREFIX}{instance_name}"
+
+
+def _list_tmux_instance_names() -> list[str]:
+    """List controllable agentchattr tmux instance names on Unix."""
+    if sys.platform == "win32" or not _shutil.which("tmux"):
+        return []
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return []
+    if result.returncode != 0:
+        return []
+    names = []
+    for raw in result.stdout.splitlines():
+        session_name = raw.strip()
+        if session_name.startswith(_TMUX_SESSION_PREFIX):
+            names.append(session_name[len(_TMUX_SESSION_PREFIX):])
+    return names
+
+
+def _find_tmux_instance_name(name: str) -> str | None:
+    """Find the raw tmux instance name for a canonical or historical agent name."""
+    session_names = _list_tmux_instance_names()
+    if name in session_names:
+        return name
+    if registry:
+        resolved = registry.resolve_name(name)
+        for candidate in session_names:
+            candidate_resolved = registry.resolve_name(candidate)
+            if candidate_resolved == name or candidate_resolved == resolved:
+                return candidate
+    return None
+
+
+def _kill_tmux_instance(name: str) -> tuple[bool, str]:
+    """Kill a tmux-backed agent session and return (ok, error_message)."""
+    if sys.platform == "win32":
+        return False, "tmux stop is not supported on Windows"
+    if not _shutil.which("tmux"):
+        return False, "tmux is not installed"
+
+    session_name = _tmux_session_name(name)
+    result = subprocess.run(
+        ["tmux", "kill-session", "-t", session_name],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return True, ""
+
+    detail = (result.stderr or result.stdout or "").strip()
+    if not detail:
+        detail = f"failed to kill tmux session {session_name}"
+    return False, detail
+
+
+def _guess_agent_base(name: str) -> str:
+    """Best-effort map an instance/canonical name back to its configured base family."""
+    agents_cfg = config.get("agents", {})
+    if registry:
+        inst = registry.get_instance(name)
+        if inst:
+            return inst.get("base", name)
+    if name in agents_cfg:
+        return name
+    if "-" in name:
+        prefix, suffix = name.rsplit("-", 1)
+        if suffix.isdigit() and prefix in agents_cfg:
+            return prefix
+    for base in agents_cfg:
+        if name == base or name.startswith(f"{base}-"):
+            return base
+    return name
+
+
+def _get_running_instances() -> list[dict]:
+    """Return concrete running instances that can be managed from the UI."""
+    agents_cfg = config.get("agents", {})
+    registry_all = registry.get_all() if registry else {}
+    instances: list[dict] = []
+    seen_ids: set[str] = set()
+
+    for raw_name in _list_tmux_instance_names():
+        canonical_name = registry.resolve_name(raw_name) if registry else raw_name
+        inst = registry_all.get(canonical_name) or registry_all.get(raw_name)
+        base = inst.get("base", raw_name) if inst else _guess_agent_base(canonical_name)
+        base_cfg = agents_cfg.get(base, {})
+        ui_launched = (
+            raw_name in _launched
+            or canonical_name in _launched
+            or (base in _launched and raw_name == base)
+        )
+        instances.append({
+            "id": raw_name,
+            "name": canonical_name,
+            "session_name": _tmux_session_name(raw_name),
+            "base": base,
+            "label": inst.get("label", canonical_name) if inst else canonical_name,
+            "color": inst.get("color", base_cfg.get("color", "#888888")) if inst else base_cfg.get("color", "#888888"),
+            "registered": bool(inst),
+            "state": inst.get("state", "active") if inst else "orphan",
+            "ui_launched": ui_launched,
+            "mode": _launched.get(base, {}).get("mode", "background") if ui_launched else "background",
+            "supports_attach": True,
+            "stoppable": True,
+            "transport": "tmux",
+        })
+        seen_ids.add(raw_name)
+
+    for base, launch_info in _launched.items():
+        if base in seen_ids:
+            continue
+        base_cfg = agents_cfg.get(base, {})
+        if base_cfg.get("type") != "api":
+            continue
+        canonical_name = registry.resolve_name(base) if registry else base
+        inst = registry_all.get(canonical_name) or registry_all.get(base)
+        instances.append({
+            "id": base,
+            "name": canonical_name,
+            "session_name": "",
+            "base": base,
+            "label": inst.get("label", canonical_name) if inst else base_cfg.get("label", canonical_name),
+            "color": inst.get("color", base_cfg.get("color", "#888888")) if inst else base_cfg.get("color", "#888888"),
+            "registered": bool(inst),
+            "state": inst.get("state", "active") if inst else "active",
+            "ui_launched": True,
+            "mode": launch_info.get("mode", "background"),
+            "supports_attach": False,
+            "stoppable": True,
+            "transport": "api",
+        })
+
+    def _sort_key(item: dict):
+        name = item.get("name", "")
+        base = item.get("base", name)
+        slot = registry_all.get(name, {}).get("slot", 999)
+        return (base, slot, name)
+
+    return sorted(instances, key=_sort_key)
+
+
+def _resolve_launch_command(agent_name: str, agent_cfg: dict,
+                            mode: str = "visible") -> str:
+    """Resolve the launch command for an agent.
+
+    mode: "visible" (default for CLI) or "background" (headless).
+    """
+    python = sys.executable
+    _ROOT = Path(__file__).parent
+    launcher = agent_cfg.get("launcher", "")
+    if launcher:
+        return launcher.replace("{python}", python)
+    if agent_cfg.get("type") == "api":
+        return f"{python} {_ROOT / 'wrapper_api.py'} {agent_name}"
+    headless = " --headless" if mode == "background" else ""
+    return f"{python} {_ROOT / 'wrapper.py'} {agent_name} --no-restart{headless}"
+
+
+def _resolve_stop_command(agent_name: str, agent_cfg: dict) -> str | None:
+    """Resolve the stop command, or None for built-in stop strategies."""
+    python = sys.executable
+    stopper = agent_cfg.get("stopper", "")
+    if stopper:
+        return stopper.replace("{python}", python)
+    return None  # use built-in strategy
+
+
+def _resolve_agent_cwd(agent_cfg: dict) -> str:
+    """Resolve working directory for an agent."""
+    _ROOT = Path(__file__).parent
+    cwd = agent_cfg.get("cwd", ".")
+    cwd_path = Path(cwd)
+    if not cwd_path.is_absolute():
+        cwd_path = _ROOT / cwd_path
+    return str(cwd_path.resolve())
+
+
+def _is_custom_launcher(agent_cfg: dict) -> bool:
+    """True if agent has an explicit launcher (not an inferred built-in)."""
+    return bool(agent_cfg.get("launcher", ""))
+
+
+def _prune_launched():
+    """Remove entries for processes that have exited."""
+    dead = [name for name, info in _launched.items() if info["proc"].poll() is not None]
+    for name in dead:
+        del _launched[name]
+
+
+@app.get("/api/launch/commands")
+async def get_launch_commands():
+    """Return launch info for all configured agents."""
+    _prune_launched()
+    agents_cfg = config.get("agents", {})
+    result = {}
+    for name, cfg in agents_cfg.items():
+        cmd = _resolve_launch_command(name, cfg)
+        is_custom = _is_custom_launcher(cfg)
+        has_stopper = bool(cfg.get("stopper", ""))
+        # Custom launcher without stopper: UI can't stop it
+        launchable = not is_custom or has_stopper
+        # Running if process is alive in _launched OR the base-name instance is registered.
+        ui_launched = name in _launched
+        registered = registry.is_registered(name) if registry else False
+        running = ui_launched or registered
+        is_cli = cfg.get("type", "cli") != "api"
+        launch_mode = _launched[name]["mode"] if ui_launched else ("external" if registered else "")
+        result[name] = {
+            "command": cmd,
+            "label": cfg.get("label", name),
+            "account": cfg.get("account", ""),
+            "color": cfg.get("color", "#888888"),
+            "type": cfg.get("type", "cli"),
+            "running": running,
+            "ui_launched": ui_launched,
+            "launchable": launchable,
+            "supports_attach": is_cli and sys.platform != "win32",
+            "mode": launch_mode,
+            "auto_approve_flag": get_auto_approve_flag(cfg),
+        }
+    _ROOT = Path(__file__).parent
+    return JSONResponse({"_root": str(_ROOT), "_running": _get_running_instances(), **result})
+
+
+@app.post("/api/launch/{agent_name}")
+async def launch_agent(agent_name: str, request: Request):
+    """Launch an agent from the UI."""
+    _prune_launched()
+    agents_cfg = config.get("agents", {})
+    if agent_name not in agents_cfg:
+        return JSONResponse({"error": f"Unknown agent: {agent_name}"}, status_code=404)
+
+    agent_cfg = agents_cfg[agent_name]
+
+    # Custom launcher without stopper: refuse to launch
+    if _is_custom_launcher(agent_cfg) and not agent_cfg.get("stopper", ""):
+        return JSONResponse(
+            {"error": "Custom launcher requires a stopper in config"},
+            status_code=400,
+        )
+
+    # Prevent double-launch: check _launched and whether the base-name instance is registered.
+    # Manual family instances (claude-2, etc.) don't block UI launch.
+    if agent_name in _launched:
+        return JSONResponse({"error": f"{agent_name} is already running"}, status_code=409)
+    if registry and registry.is_registered(agent_name):
+        return JSONResponse({"error": f"{agent_name} is already registered"}, status_code=409)
+
+    # Parse optional extra args and mode
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    extra_args = body.get("extra_args", "")
+    is_api = agent_cfg.get("type") == "api"
+    mode = body.get("mode", "background" if is_api else "visible")
+    # API agents are always background
+    if is_api:
+        mode = "background"
+
+    cmd = _resolve_launch_command(agent_name, agent_cfg, mode=mode)
+    auto_approve = body.get("auto_approve", False)
+    if auto_approve:
+        flag = get_auto_approve_flag(agent_cfg)
+        if flag:
+            cmd = f"{cmd} {flag}"
+    if extra_args:
+        cmd = f"{cmd} {extra_args}"
+
+    cwd = _resolve_agent_cwd(agent_cfg)
+
+    # Log output to data dir
+    _ROOT = Path(__file__).parent
+    data_dir = _ROOT / config.get("server", {}).get("data_dir", "./data")
+    log_path = data_dir / f"{agent_name}_launch.log"
+    log_file = open(log_path, "w")
+
+    try:
+        if mode == "visible" and not is_api and sys.platform != "win32":
+            # Visible mode: open a terminal emulator running the wrapper
+            terminal = _find_terminal()
+            if terminal:
+                if terminal == "gnome-terminal":
+                    term_cmd = ["gnome-terminal", "--", "bash", "-c", f"cd {cwd} && {cmd}"]
+                else:  # xterm
+                    term_cmd = ["xterm", "-e", "sh", "-c", f"cd {cwd} && {cmd}"]
+                proc = subprocess.Popen(term_cmd, cwd=cwd)
+            else:
+                # No terminal found — fall back to headless
+                mode = "background"
+                cmd = _resolve_launch_command(agent_name, agent_cfg, mode="background")
+                if auto_approve:
+                    flag = get_auto_approve_flag(agent_cfg)
+                    if flag:
+                        cmd = f"{cmd} {flag}"
+                if extra_args:
+                    cmd = f"{cmd} {extra_args}"
+                proc = subprocess.Popen(
+                    cmd, shell=True, cwd=cwd,
+                    stdout=log_file, stderr=log_file,
+                )
+        else:
+            # Background or API or Windows: headless subprocess
+            proc = subprocess.Popen(
+                cmd, shell=True, cwd=cwd,
+                stdout=log_file, stderr=log_file,
+            )
+    except Exception as e:
+        log_file.close()
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    _launched[agent_name] = {"proc": proc, "mode": mode}
+    return JSONResponse({"ok": True, "command": cmd, "mode": mode})
+
+
+@app.post("/api/launch/{agent_name}/stop")
+async def stop_agent(agent_name: str):
+    """Stop a managed runtime instance or a UI-launched base agent."""
+    agents_cfg = config.get("agents", {})
+    agent_cfg = agents_cfg.get(agent_name, {})
+
+    _ROOT = Path(__file__).parent
+    data_dir = _ROOT / config.get("server", {}).get("data_dir", "./data")
+    cwd = _resolve_agent_cwd(agent_cfg) if agent_cfg else str(_ROOT)
+
+    if agent_name in _launched:
+        # Try explicit stopper first for configured/UI-launched agents.
+        stopper = _resolve_stop_command(agent_name, agent_cfg)
+        if stopper:
+            try:
+                subprocess.Popen(stopper, shell=True, cwd=cwd)
+            except Exception as e:
+                return JSONResponse({"error": f"Stopper failed: {e}"}, status_code=500)
+        elif agent_cfg.get("type") == "api":
+            stop_file = data_dir / f"{agent_name}_stop"
+            stop_file.write_text("", "utf-8")
+        elif sys.platform != "win32":
+            raw_name = _find_tmux_instance_name(agent_name) or agent_name
+            stopped, error = _kill_tmux_instance(raw_name)
+            if not stopped:
+                return JSONResponse(
+                    {"error": f"Failed to stop {agent_name}: {error}"},
+                    status_code=404,
+                )
+        else:
+            _launched[agent_name]["proc"].terminate()
+        _launched.pop(agent_name, None)
+        return JSONResponse({"ok": True})
+
+    if sys.platform != "win32":
+        raw_name = _find_tmux_instance_name(agent_name)
+        if raw_name:
+            stopped, error = _kill_tmux_instance(raw_name)
+            if not stopped:
+                return JSONResponse(
+                    {"error": f"Failed to stop {agent_name}: {error}"},
+                    status_code=404,
+                )
+            return JSONResponse({"ok": True, "tmux_only": True})
+
+    return JSONResponse({"error": f"No running managed instance: {agent_name}"}, status_code=404)
+
+
+@app.post("/api/launch/{agent_name}/attach")
+async def attach_agent(agent_name: str):
+    """Open a terminal attached to a running CLI agent's tmux session."""
+    if sys.platform == "win32":
+        return JSONResponse({"error": "Attach not supported on Windows"}, status_code=400)
+
+    raw_name = _find_tmux_instance_name(agent_name)
+    if not raw_name:
+        return JSONResponse({"error": f"No tmux session for: {agent_name}"}, status_code=404)
+
+    session_name = _tmux_session_name(raw_name)
+    attach_cmd = f"tmux attach -t {session_name}"
+
+    # Open terminal emulator
+    terminal = _find_terminal()
+    opened = False
+    if terminal:
+        if terminal == "gnome-terminal":
+            subprocess.Popen(["gnome-terminal", "--", "tmux", "attach", "-t", session_name])
+        else:  # xterm
+            subprocess.Popen(["xterm", "-e", "sh", "-c", f"tmux attach -t {session_name}"])
+        opened = True
+    # Return whether a terminal was opened + the command for manual fallback
+    return JSONResponse({"ok": True, "opened": opened, "command": attach_cmd})

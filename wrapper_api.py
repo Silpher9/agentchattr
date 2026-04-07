@@ -309,6 +309,14 @@ def main():
             try:
                 # Update queue file path in case of rename
                 current_name = get_name()
+
+                # Check for stop sentinel (written by UI launch panel)
+                stop_file = data_dir / f"{current_name}_stop"
+                if stop_file.exists():
+                    stop_file.unlink(missing_ok=True)
+                    print("\n  Stop requested via UI.")
+                    break
+
                 qf = data_dir / f"{current_name}_queue.jsonl"
 
                 if qf.exists() and qf.stat().st_size > 0:

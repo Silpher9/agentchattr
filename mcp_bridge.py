@@ -29,13 +29,14 @@ agents = None         # set by run.py — AgentManager instance
 _presence: dict[str, float] = {}
 _activity: dict[str, bool] = {}   # True = screen changed on last poll
 _activity_ts: dict[str, float] = {}  # timestamp of last active=True heartbeat
-ACTIVITY_TIMEOUT = 8  # auto-expire activity after 8s without a fresh active=True
+ACTIVITY_TIMEOUT = 20  # auto-expire activity after 20s without a fresh active=True
 _presence_lock = threading.Lock()   # guards both _presence and _activity
 _renamed_from: set[str] = set()    # old names from renames — suppress leave messages
 _cursors: dict[str, dict[str, int]] = {}  # agent_name → {channel_name → last_id}
 _cursors_lock = threading.Lock()
+_last_read_channel: dict[str, str] = {}  # agent_name → most recently read specific channel
 _empty_read_count: dict[str, int] = {}  # sender → consecutive empty reads
-PRESENCE_TIMEOUT = 10  # ~2 missed heartbeats (5s interval) = offline
+PRESENCE_TIMEOUT = 30  # ~6 missed heartbeats (5s interval) = offline
 
 # Roles — per-instance, persisted to roles.json
 _roles: dict[str, str] = {}  # agent_name → role string
@@ -76,13 +77,16 @@ _MCP_INSTRUCTIONS = (
     "A second read is fine if you can name the reason (checked a different channel, did work and expect a reply, "
     "recovering from an error). After an empty read ('No new messages'), do NOT read the same channel again — "
     "stop and wait for your next prompt. Never use chat_read as a sleep/wait loop.\n\n"
-    "Rules are the shared working style for your agents. They are short imperative instructions that all agents should follow. "
-    "At session start, call chat_rules(action='list') to read active rules — treat them as authoritative guidance. "
+    "Rules are the shared working style for your agents. They can be global (apply everywhere) or scoped to a specific channel. "
+    "At session start, call chat_rules(action='list', channel=channel) to read active rules for your current channel — "
+    "treat them as authoritative guidance. "
     "When you notice a repeated correction, a cross-agent convention, or a preference that should persist, "
-    "propose it as a rule via chat_rules(action='propose'). Keep rules short and imperative (max 160 chars). "
+    "propose it as a rule via chat_rules(action='propose', channel=channel). Keep rules short and imperative (max 160 chars). "
     "Don't propose trivial or session-specific things. chat_decision is an alias for chat_rules (backward compat).\n\n"
-    "Messages belong to channels (default: 'general'). Use the 'channel' parameter in chat_send and "
-    "chat_read to target a specific channel. Omit channel or pass empty string to read from all channels.\n\n"
+    "Messages belong to channels. Omit the 'channel' parameter in chat_send to automatically reply in "
+    "the channel you last read from. Pass channel='general' to explicitly target #general. "
+    "Use the 'channel' parameter in chat_read to target a specific channel. "
+    "Omit channel or pass empty string in chat_read to read from all channels.\n\n"
     "If you are addressed in chat, respond in chat — use chat_send to reply in the same channel. "
     "Do not take the answer back to your terminal session. "
     "If the latest message in a channel is addressed to you (or all agents), treat it as your active task "
@@ -189,14 +193,14 @@ def chat_send(
     choices: list[str] = [],
     image_path: str = "",
     reply_to: int = -1,
-    channel: str = "general",
+    channel: str = "",
     job_id: int = 0,
     ctx: Context | None = None,
 ) -> str:
     """Send a message to the agentchattr chat. Use your name as sender (claude/codex/user).
     Optionally attach a local image by providing image_path (absolute path).
     Optionally reply to a message by providing reply_to (message ID).
-    Optionally specify a channel (default: 'general').
+    Omit channel to use your current/last-read channel. Pass channel='general' to explicitly target #general.
     Optionally specify a job_id to post into a job conversation instead of the main timeline.
     IMPORTANT: Always include the choices parameter. When asking a yes/no or
     multiple-choice question, provide the options so the user can respond with
@@ -207,6 +211,9 @@ def chat_send(
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=True)
     if err:
         return err
+    # Infer channel from last-read cursor when omitted
+    if not channel.strip():
+        channel = _last_active_channel(sender) or "general"
     # Block pending instances (identity not yet confirmed)
     if registry and registry.is_pending(sender):
         return "Error: identity not confirmed. Call chat_claim(sender=your_base_name) to get your identity."
@@ -328,7 +335,7 @@ def chat_propose_job(
     sender: str,
     title: str,
     body: str = "",
-    channel: str = "general",
+    channel: str = "",
     ctx: Context | None = None,
 ) -> str:
     """Propose a job for human approval. Posts a proposal card in the timeline.
@@ -338,11 +345,13 @@ def chat_propose_job(
     Args:
         title: Short job title (max 80 chars)
         body: Detailed description of the work (max 1000 chars)
-        channel: Channel to post the proposal in
+        channel: Omit to use your current/last-read channel. Pass 'general' to explicitly target #general.
     """
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=True)
     if err:
         return err
+    if not channel.strip():
+        channel = _last_active_channel(sender) or "general"
     if not title.strip():
         return "Error: title is required."
     title = title.strip()[:80]
@@ -483,6 +492,8 @@ def migrate_identity(old_name: str, new_name: str):
     with _cursors_lock:
         if old_name in _cursors:
             _cursors[new_name] = _cursors.pop(old_name)
+        if old_name in _last_read_channel:
+            _last_read_channel[new_name] = _last_read_channel.pop(old_name)
     if old_name in _roles:
         _roles[new_name] = _roles.pop(old_name)
         _save_roles()
@@ -497,6 +508,7 @@ def purge_identity(name: str):
         _activity_ts.pop(name, None)
     with _cursors_lock:
         _cursors.pop(name, None)
+        _last_read_channel.pop(name, None)
     if name in _roles:
         del _roles[name]
         _save_roles()
@@ -509,6 +521,9 @@ def migrate_cursors_rename(old_name: str, new_name: str):
         for agent_cursors in _cursors.values():
             if old_name in agent_cursors:
                 agent_cursors[new_name] = agent_cursors.pop(old_name)
+        for agent, ch in list(_last_read_channel.items()):
+            if ch == old_name:
+                _last_read_channel[agent] = new_name
     _save_cursors()
 
 
@@ -517,6 +532,9 @@ def migrate_cursors_delete(channel: str):
     with _cursors_lock:
         for agent_cursors in _cursors.values():
             agent_cursors.pop(channel, None)
+        for agent, ch in list(_last_read_channel.items()):
+            if ch == channel:
+                del _last_read_channel[agent]
     _save_cursors()
 
 
@@ -526,7 +544,16 @@ def _update_cursor(sender: str, msgs: list[dict], channel: str | None):
         with _cursors_lock:
             agent_cursors = _cursors.setdefault(sender, {})
             agent_cursors[ch_key] = msgs[-1]["id"]
+            # Track the most recently read specific channel (not __all__)
+            if channel:
+                _last_read_channel[sender] = channel
         _save_cursors()
+
+
+def _last_active_channel(sender: str) -> str | None:
+    """Return the sender's most recently read specific channel, or None."""
+    with _cursors_lock:
+        return _last_read_channel.get(sender)
 
 
 def chat_read(
@@ -728,24 +755,28 @@ def chat_rules(
     sender: str,
     rule: str = "",
     reason: str = "",
-    channel: str = "general",
+    channel: str = "",
     ctx: Context | None = None,
 ) -> str:
-    """Manage shared rules — the working style for your agents. Agents can list and propose; humans approve via the web UI.
+    """Manage shared rules — the working style for your agents. Rules can be global or channel-scoped.
+    Agents can list and propose; humans approve via the web UI.
 
     Actions:
-      - list: Returns active rules (the current working style).
+      - list: Returns active rules for the given channel (channel-scoped + global rules).
       - propose: Propose a new rule for human approval. Requires rule text + sender + channel.
 
-    Pass channel to place the proposal card in the correct chat channel (default: 'general').
+    Omit channel to use your current/last-read channel. Pass channel='general' to explicitly target #general.
+    Global rules (applied to all channels) can only be created by humans via the web UI.
     Agents cannot activate, edit, or delete rules — only humans can do that from the web UI."""
     sender, err = _resolve_tool_identity(sender, ctx, field_name="sender", required=False)
     if err:
         return err
+    if not channel.strip():
+        channel = _last_active_channel(sender) or "general"
     action = action.strip().lower()
 
     if action == "list":
-        active = rules.active_list()
+        active = rules.active_list(channel=channel)
         if not active["rules"]:
             return "No active rules."
         lines = [f"Active rules (epoch {active['epoch']}):"]
@@ -758,7 +789,7 @@ def chat_rules(
             return "Error: rule text is required."
         if not sender.strip():
             return "Error: sender is required."
-        result = rules.propose(rule, sender, reason)
+        result = rules.propose(rule, sender, reason, channel=channel)
         if result is None:
             return "Error: too many rules."
         # Add proposal card to chat timeline
@@ -766,7 +797,7 @@ def chat_rules(
             store.add(
                 sender, f"Rule proposal: {result['text']}",
                 msg_type="rule_proposal",
-                channel=channel or "general",
+                channel=channel,
                 metadata={"rule_id": result["id"], "text": result["text"], "status": "pending"},
             )
         return f"Proposed rule #{result['id']}: '{result['text']}'. Human will review in the Rules panel."
@@ -782,10 +813,11 @@ def chat_decision(
     sender: str,
     decision: str = "",
     reason: str = "",
+    channel: str = "",
     ctx: Context | None = None,
 ) -> str:
     """Backward-compatible alias for chat_rules. Use chat_rules instead."""
-    return chat_rules(action=action, sender=sender, rule=decision, reason=reason, ctx=ctx)
+    return chat_rules(action=action, sender=sender, rule=decision, reason=reason, channel=channel, ctx=ctx)
 
 
 # --- Server instances ---
@@ -856,7 +888,9 @@ def chat_summary(
     if err:
         return err
     action = action.strip().lower()
-    channel = (channel or "general").strip()
+    if not channel.strip():
+        channel = _last_active_channel(sender) or "general"
+    channel = channel.strip()
 
     if action == "read":
         entry = summaries.get(channel)

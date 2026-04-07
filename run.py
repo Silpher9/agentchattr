@@ -12,6 +12,19 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
+log = logging.getLogger(__name__)
+
+
+def _resilient_mcp_runner(name: str, func, backoff_seconds: float = 2.0):
+    """Run an MCP server function forever, restarting on crash or early exit."""
+    while True:
+        try:
+            func()
+            log.warning("MCP %s server exited unexpectedly — restarting in %.1fs", name, backoff_seconds)
+        except Exception:
+            log.exception("MCP %s server crashed — restarting in %.1fs", name, backoff_seconds)
+        time.sleep(backoff_seconds)
+
 
 def main():
     logging.basicConfig(
@@ -61,10 +74,20 @@ def main():
     mcp_bridge.mcp_http.settings.port = http_port
     mcp_bridge.mcp_sse.settings.port = sse_port
 
-    threading.Thread(target=mcp_bridge.run_http_server, daemon=True).start()
-    threading.Thread(target=mcp_bridge.run_sse_server, daemon=True).start()
+    threading.Thread(
+        target=_resilient_mcp_runner,
+        args=("HTTP", mcp_bridge.run_http_server),
+        daemon=True,
+        name="agentchattr-mcp-http",
+    ).start()
+    threading.Thread(
+        target=_resilient_mcp_runner,
+        args=("SSE", mcp_bridge.run_sse_server),
+        daemon=True,
+        name="agentchattr-mcp-sse",
+    ).start()
     time.sleep(0.5)
-    logging.getLogger(__name__).info("MCP streamable-http on port %d, SSE on port %d", http_port, sse_port)
+    log.info("MCP streamable-http on port %d, SSE on port %d", http_port, sse_port)
 
     # Mount static files
     from fastapi.staticfiles import StaticFiles
@@ -137,4 +160,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

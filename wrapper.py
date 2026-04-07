@@ -404,12 +404,15 @@ def _fetch_role(server_port: int, agent_name: str) -> str:
         return ""
 
 
-def _fetch_active_rules(server_port: int, token: str = "") -> dict | None:
-    """Fetch active rules from the server."""
+def _fetch_active_rules(server_port: int, token: str = "", channel: str = "") -> dict | None:
+    """Fetch active rules from the server, optionally filtered by channel."""
     try:
         import urllib.request
+        url = f"http://127.0.0.1:{server_port}/api/rules/active"
+        if channel:
+            url += f"?channel={channel}"
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        req = urllib.request.Request(f"http://127.0.0.1:{server_port}/api/rules/active", headers=headers)
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=3) as resp:
             return json.loads(resp.read())
     except Exception:
@@ -441,6 +444,7 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
     """Poll queue file and inject an MCP read task when triggered."""
     first_mention = True
     last_rules_epoch = 0  # 0 = unknown/cold start — will inject on first trigger
+    last_rules_channel = ""  # track channel to re-inject when switching channels
     trigger_count = 0
     while True:
         try:
@@ -506,7 +510,7 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
 
                     # Smart rules injection: first trigger, epoch change, or periodic refresh
                     _token = get_token_fn() if get_token_fn else ""
-                    rules_data = _fetch_active_rules(server_port, _token)
+                    rules_data = _fetch_active_rules(server_port, _token, channel=channel)
                     trigger_count += 1
                     if rules_data:
                         # Use server-side refresh_interval (live from settings UI)
@@ -514,6 +518,7 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                         need_inject = (
                             last_rules_epoch == 0
                             or rules_data["epoch"] != last_rules_epoch
+                            or channel != last_rules_channel
                             or (ri > 0 and trigger_count % ri == 0)
                         )
                         if need_inject:
@@ -521,6 +526,7 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                                 rules_text = "; ".join(rules_data["rules"])
                                 prompt += f"\n\nRULES:\n{rules_text}"
                             last_rules_epoch = rules_data["epoch"]
+                            last_rules_channel = channel
                             _report_rule_sync(server_port, current_name, rules_data["epoch"], _token)
 
                     if first_mention and is_multi_instance:
@@ -553,6 +559,7 @@ def main():
     parser = argparse.ArgumentParser(description="Agent wrapper with chat auto-trigger")
     parser.add_argument("agent", choices=agent_names, help=f"Agent to wrap ({', '.join(agent_names)})")
     parser.add_argument("--no-restart", action="store_true", help="Do not restart on exit")
+    parser.add_argument("--headless", action="store_true", help="Run without attaching to terminal (for UI-launched agents)")
     parser.add_argument("--label", type=str, default=None, help="Custom display label")
     args, extra = parser.parse_known_args()
 
@@ -712,6 +719,8 @@ def main():
     print(f"  @{assigned_name} mentions auto-inject MCP reads")
     print(f"  Starting {command} in {cwd}...\n")
 
+    _last_reregister = [0]  # timestamp of last 409 re-registration
+
     def _heartbeat():
         while True:
             current_name, _ = get_identity()
@@ -731,12 +740,17 @@ def main():
                     set_runtime_identity(server_name)
             except urllib.error.HTTPError as exc:
                 if exc.code == 409:
-                    try:
-                        replacement = _register_instance(server_port, agent, args.label)
-                        set_runtime_identity(replacement["name"], replacement["token"])
-                        _notify_recovery(data_dir, replacement["name"])
-                    except Exception:
-                        pass
+                    # Throttle re-registration to once per 30s to prevent
+                    # cascading slot creation (gemini-2, gemini-3, ...)
+                    now = time.time()
+                    if now - _last_reregister[0] > 30:
+                        try:
+                            replacement = _register_instance(server_port, agent, args.label)
+                            set_runtime_identity(replacement["name"], replacement["token"])
+                            _notify_recovery(data_dir, replacement["name"])
+                            _last_reregister[0] = now
+                        except Exception:
+                            pass
                 time.sleep(5)
                 continue
             except Exception:
@@ -858,6 +872,7 @@ def main():
     )
     if sys.platform != "win32":
         run_kwargs["session_name"] = unix_session_name
+        run_kwargs["headless"] = args.headless
 
     try:
         run_agent(**run_kwargs)

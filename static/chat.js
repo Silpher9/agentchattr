@@ -458,6 +458,7 @@ function connectWebSocket() {
             });
         } else if (event.type === 'agents') {
             applyAgentConfig(event.data);
+            if (window.handleLaunchAgentsChanged) window.handleLaunchAgentsChanged();
         } else if (event.type === 'base_colors') {
             baseColors = event.data || {};
         } else if (event.type === 'todos') {
@@ -475,6 +476,7 @@ function connectWebSocket() {
             updateTodoState(d.id, d.status);
         } else if (event.type === 'status') {
             updateStatus(event.data);
+            if (window.updateLaunchStatus) window.updateLaunchStatus(event.data);
             // Status is the last event sent on connect — enable sounds after history
             if (!soundEnabled) {
                 soundEnabled = true;
@@ -1484,6 +1486,32 @@ function showPillPopover(pillEl, opts) {
             if (colorInput) colorInput.value = defaultColor;
         });
     }
+
+    // --- Stop button ---
+    const stopSection = document.createElement('div');
+    stopSection.className = 'pill-popover-section pill-popover-stop';
+    stopSection.innerHTML = `<button class="pill-popover-stop-btn">■ Stop agent</button>`;
+    popover.appendChild(stopSection);
+
+    popover.querySelector('.pill-popover-stop-btn').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Stop agent "${opts.name}"?`)) return;
+        try {
+            const resp = await fetch(`/api/launch/${encodeURIComponent(opts.name)}/stop`, {
+                method: 'POST',
+                headers: { 'X-Session-Token': window.SESSION_TOKEN },
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                alert(`Stop failed: ${data.error || resp.statusText}`);
+                return;
+            }
+        } catch (err) {
+            alert(`Stop error: ${err.message}`);
+            return;
+        }
+        closePopover();
+    });
 
     document.body.appendChild(popover);
 

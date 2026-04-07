@@ -30,6 +30,7 @@ import logging
 import sys
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
@@ -87,7 +88,12 @@ class McpIdentityProxy:
         self._agent_name = agent_name
         self._token = instance_token
         self._port = port  # 0 = OS-assigned (legacy), >0 = fixed
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._recover_cond = threading.Condition(self._lock)
+        self._upstream_session_id: str | None = None
+        self._init_request_body: bytes | None = None
+        self._recovering = False
+        self._last_recovery_ok = False
         self._server: _ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -122,6 +128,45 @@ class McpIdentityProxy:
         with self._lock:
             self._token = value
 
+    def _get_upstream_session_id(self) -> str | None:
+        with self._lock:
+            return self._upstream_session_id
+
+    def _set_upstream_session_id(self, session_id: str | None):
+        with self._recover_cond:
+            self._upstream_session_id = session_id
+
+    def _remember_initialize(self, raw: bytes):
+        with self._recover_cond:
+            self._init_request_body = raw
+
+    def _prepare_recovery(self) -> tuple[str, bytes | None]:
+        """Return ('leader'|'waited'|'missing', init_body)."""
+        with self._recover_cond:
+            if self._recovering:
+                while self._recovering:
+                    self._recover_cond.wait()
+                return "waited", None
+            if not self._init_request_body:
+                return "missing", None
+            self._recovering = True
+            self._last_recovery_ok = False
+            return "leader", self._init_request_body
+
+    def _finish_recovery(self, ok: bool, session_id: str | None = None):
+        with self._recover_cond:
+            if ok:
+                self._upstream_session_id = session_id
+            else:
+                self._upstream_session_id = None
+            self._last_recovery_ok = ok
+            self._recovering = False
+            self._recover_cond.notify_all()
+
+    def _recovery_succeeded(self) -> bool:
+        with self._recover_cond:
+            return self._last_recovery_ok and bool(self._upstream_session_id)
+
     def start(self):
         proxy = self
 
@@ -134,7 +179,8 @@ class McpIdentityProxy:
                 p = path if path else self.path
                 return f"{proxy._upstream_base}{p}"
 
-            def _send_response_headers(self, headers):
+            def _send_response_headers(self, headers, *, fallback_session_id: str | None = None):
+                sent_session_header = False
                 for key in (
                     "Content-Type",
                     "Mcp-Session-Id",
@@ -145,7 +191,186 @@ class McpIdentityProxy:
                 ):
                     val = headers.get(key)
                     if val:
+                        if key.lower() == "mcp-session-id":
+                            sent_session_header = True
                         self.send_header(key, val)
+                if fallback_session_id and not sent_session_header:
+                    self.send_header("Mcp-Session-Id", fallback_session_id)
+
+            @staticmethod
+            def _is_session_not_found(status: int, body: bytes) -> bool:
+                return status == 404 and b"session not found" in body.lower()
+
+            def _is_streamable_http(self) -> bool:
+                path = urlsplit(self.path).path
+                return proxy._upstream_path == "/mcp" and path == "/mcp"
+
+            def _jsonrpc_method(self, raw: bytes) -> str:
+                if not raw:
+                    return ""
+                try:
+                    data = json.loads(raw)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    return ""
+                if isinstance(data, dict):
+                    return str(data.get("method", "") or "")
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and item.get("method"):
+                            return str(item.get("method") or "")
+                return ""
+
+            def _build_upstream_request(
+                self,
+                method: str,
+                *,
+                data: bytes | None = None,
+                path: str | None = None,
+                use_proxy_session: bool = False,
+                explicit_session_id: str | None = None,
+                extra_headers: dict[str, str] | None = None,
+            ) -> Request:
+                req = Request(self._upstream_url(path), data=data, method=method)
+                extra_header_names = {k.lower() for k in (extra_headers or {})}
+                for hdr, val in self.headers.items():
+                    lower = hdr.lower()
+                    if lower in ("content-length", "host", "mcp-session-id") or lower in extra_header_names:
+                        continue
+                    req.add_header(hdr, val)
+
+                session_id = explicit_session_id
+                if use_proxy_session and session_id is None:
+                    session_id = proxy._get_upstream_session_id()
+                if session_id:
+                    req.add_header("Mcp-Session-Id", session_id)
+
+                if extra_headers:
+                    for hdr, val in extra_headers.items():
+                        req.add_header(hdr, val)
+
+                req.add_header("Authorization", f"Bearer {proxy.token}")
+                req.add_header("X-Agent-Token", proxy.token)
+                return req
+
+            def _send_upstream_request(
+                self,
+                method: str,
+                *,
+                data: bytes | None = None,
+                path: str | None = None,
+                use_proxy_session: bool = False,
+                explicit_session_id: str | None = None,
+                extra_headers: dict[str, str] | None = None,
+                timeout: int = 30,
+            ) -> tuple[int, bytes, object]:
+                req = self._build_upstream_request(
+                    method,
+                    data=data,
+                    path=path,
+                    use_proxy_session=use_proxy_session,
+                    explicit_session_id=explicit_session_id,
+                    extra_headers=extra_headers,
+                )
+                try:
+                    resp = urlopen(req, timeout=timeout)
+                    return resp.status, resp.read(), resp.headers
+                except HTTPError as e:
+                    return e.code, e.read(), e.headers
+
+            def _open_upstream_stream(
+                self,
+                *,
+                path: str | None = None,
+                use_proxy_session: bool = False,
+                timeout: int = 300,
+            ):
+                req = self._build_upstream_request(
+                    "GET",
+                    path=path,
+                    use_proxy_session=use_proxy_session,
+                )
+                return urlopen(req, timeout=timeout)
+
+            @staticmethod
+            def _extract_session_id(headers) -> str:
+                return headers.get("Mcp-Session-Id") or headers.get("mcp-session-id") or ""
+
+            def _update_session_from_headers(self, headers):
+                session_id = self._extract_session_id(headers)
+                if session_id:
+                    proxy._set_upstream_session_id(session_id)
+                return session_id
+
+            def _reinitialize_upstream_session(self) -> bool:
+                state, init_body = proxy._prepare_recovery()
+                if state == "missing":
+                    log.warning(
+                        "MCP session lost for %s, but no initialize payload was stored; cannot recover",
+                        proxy.agent_name,
+                    )
+                    return False
+                if state == "waited":
+                    return proxy._recovery_succeeded()
+
+                assert init_body is not None
+                log.warning("MCP session lost for %s — starting streamable-http recovery", proxy.agent_name)
+                ok = False
+                new_session_id = None
+                try:
+                    init_status, init_resp_body, init_headers = self._send_upstream_request(
+                        "POST",
+                        data=init_body,
+                        path=proxy._upstream_path,
+                        use_proxy_session=False,
+                        extra_headers={"Content-Type": "application/json"},
+                        timeout=30,
+                    )
+                    if init_status >= 400:
+                        log.warning(
+                            "MCP session recovery initialize failed for %s: HTTP %s %s",
+                            proxy.agent_name,
+                            init_status,
+                            init_resp_body.decode("utf-8", "replace")[:200],
+                        )
+                    else:
+                        new_session_id = self._extract_session_id(init_headers)
+                        if not new_session_id:
+                            log.warning(
+                                "MCP session recovery initialize returned no session id for %s",
+                                proxy.agent_name,
+                            )
+                        else:
+                            notif_body = json.dumps({
+                                "jsonrpc": "2.0",
+                                "method": "notifications/initialized",
+                            }).encode("utf-8")
+                            notif_status, notif_resp_body, _ = self._send_upstream_request(
+                                "POST",
+                                data=notif_body,
+                                path=proxy._upstream_path,
+                                explicit_session_id=new_session_id,
+                                extra_headers={"Content-Type": "application/json"},
+                                timeout=30,
+                            )
+                            if notif_status >= 400:
+                                log.warning(
+                                    "MCP session recovery initialized notification failed for %s: HTTP %s %s",
+                                    proxy.agent_name,
+                                    notif_status,
+                                    notif_resp_body.decode("utf-8", "replace")[:200],
+                                )
+                            else:
+                                ok = True
+                except (URLError, OSError) as exc:
+                    log.warning("MCP session recovery failed for %s: %s", proxy.agent_name, exc)
+                finally:
+                    proxy._finish_recovery(ok, new_session_id)
+
+                if ok:
+                    log.info("MCP session recovered for %s", proxy.agent_name)
+                else:
+                    log.warning("MCP session recovery failed for %s", proxy.agent_name)
+                return ok
 
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
@@ -153,56 +378,108 @@ class McpIdentityProxy:
 
                 # Inject sender into MCP tool calls
                 body = self._maybe_inject_sender(raw)
+                method_name = self._jsonrpc_method(raw)
+                is_streamable = self._is_streamable_http()
+                if is_streamable and method_name == "initialize":
+                    proxy._remember_initialize(raw)
+                    proxy._set_upstream_session_id(None)
 
                 try:
-                    req = Request(
-                        self._upstream_url(),
+                    status, resp_body, resp_headers = self._send_upstream_request(
+                        "POST",
                         data=body,
-                        method="POST",
+                        use_proxy_session=is_streamable and method_name != "initialize",
+                        extra_headers={"Content-Type": self.headers.get("Content-Type", "application/json")},
+                        timeout=30,
                     )
-                    # Forward all headers from client
-                    for hdr, val in self.headers.items():
-                        if hdr.lower() not in ("content-length", "host"):
-                            req.add_header(hdr, val)
-                    
-                    req.add_header("Authorization", f"Bearer {proxy.token}")
-                    req.add_header("X-Agent-Token", proxy.token)
-
-                    resp = urlopen(req, timeout=30)
-                    status = resp.status
-                    resp_body = resp.read()
-                    resp_headers = resp.headers
-                except HTTPError as e:
-                    status = e.code
-                    resp_body = e.read()
-                    resp_headers = e.headers
                 except (URLError, OSError) as e:
                     self.send_error(502, f"Upstream error: {e}")
                     return
 
+                if is_streamable and self._is_session_not_found(status, resp_body):
+                    log.warning("MCP session not found from upstream for %s", proxy.agent_name)
+                    if self._reinitialize_upstream_session():
+                        try:
+                            status, resp_body, resp_headers = self._send_upstream_request(
+                                "POST",
+                                data=body,
+                                use_proxy_session=True,
+                                extra_headers={"Content-Type": self.headers.get("Content-Type", "application/json")},
+                                timeout=30,
+                            )
+                        except (URLError, OSError) as e:
+                            self.send_error(502, f"Upstream error: {e}")
+                            return
+                elif not is_streamable and self._is_session_not_found(status, resp_body):
+                    log.warning(
+                        "SSE MCP session lost for %s — automatic recovery is not implemented yet; client must reconnect",
+                        proxy.agent_name,
+                    )
+
+                fallback_session_id = ""
+                if is_streamable and status < 400 and method_name != "notifications/initialized":
+                    fallback_session_id = self._update_session_from_headers(resp_headers)
+                    if not fallback_session_id:
+                        fallback_session_id = proxy._get_upstream_session_id() or ""
+
                 self.send_response(status)
-                self._send_response_headers(resp_headers)
+                self._send_response_headers(
+                    resp_headers,
+                    fallback_session_id=fallback_session_id or None,
+                )
                 self.send_header("Content-Length", str(len(resp_body)))
                 self.end_headers()
                 self.wfile.write(resp_body)
 
             def do_GET(self):
                 """Forward GET — handles both streamable-http and SSE streams."""
+                is_streamable = self._is_streamable_http()
                 try:
-                    req = Request(self._upstream_url(), method="GET")
-                    # Forward all headers from client
-                    for hdr, val in self.headers.items():
-                        if hdr.lower() not in ("host",):
-                            req.add_header(hdr, val)
-                    
-                    req.add_header("Authorization", f"Bearer {proxy.token}")
-                    req.add_header("X-Agent-Token", proxy.token)
-
-                    resp = urlopen(req, timeout=300)
+                    resp = self._open_upstream_stream(
+                        use_proxy_session=is_streamable,
+                        timeout=300,
+                    )
                 except HTTPError as e:
                     status = e.code
                     resp_body = e.read()
                     resp_headers = e.headers
+                    if is_streamable and self._is_session_not_found(status, resp_body):
+                        log.warning("MCP stream GET session not found for %s", proxy.agent_name)
+                        if self._reinitialize_upstream_session():
+                            try:
+                                resp = self._open_upstream_stream(
+                                    use_proxy_session=True,
+                                    timeout=300,
+                                )
+                            except HTTPError as retry_err:
+                                status = retry_err.code
+                                resp_body = retry_err.read()
+                                resp_headers = retry_err.headers
+                            except (URLError, OSError) as err:
+                                self.send_error(502, f"Upstream error: {err}")
+                                return
+                            else:
+                                fallback_session_id = self._update_session_from_headers(resp.headers)
+                                self.send_response(resp.status)
+                                self._send_response_headers(
+                                    resp.headers,
+                                    fallback_session_id=fallback_session_id or None,
+                                )
+                                self.end_headers()
+                                try:
+                                    for line in resp:
+                                        if line.startswith(b"data:"):
+                                            line = self._rewrite_sse_endpoint(line)
+                                        self.wfile.write(line)
+                                        self.wfile.flush()
+                                except BrokenPipeError:
+                                    pass
+                                return
+                    elif not is_streamable and self._is_session_not_found(status, resp_body):
+                        log.warning(
+                            "SSE MCP stream session lost for %s — automatic recovery is not implemented yet; client must reconnect",
+                            proxy.agent_name,
+                        )
                     self.send_response(status)
                     self._send_response_headers(resp_headers)
                     self.send_header("Content-Length", str(len(resp_body)))
@@ -216,8 +493,12 @@ class McpIdentityProxy:
                     self.send_error(502, f"Upstream error: {e}")
                     return
 
+                fallback_session_id = None
+                if is_streamable:
+                    fallback_session_id = self._update_session_from_headers(resp.headers) or proxy._get_upstream_session_id()
+
                 self.send_response(resp.status)
-                self._send_response_headers(resp.headers)
+                self._send_response_headers(resp.headers, fallback_session_id=fallback_session_id)
                 self.end_headers()
 
                 try:
@@ -234,18 +515,32 @@ class McpIdentityProxy:
 
             def do_DELETE(self):
                 try:
-                    req = Request(self._upstream_url(), method="DELETE")
-                    for hdr in ("Mcp-Session-Id",):
-                        val = self.headers.get(hdr)
-                        if val:
-                            req.add_header(hdr, val)
-                    req.add_header("Authorization", f"Bearer {proxy.token}")
-                    req.add_header("X-Agent-Token", proxy.token)
-                    resp = urlopen(req, timeout=10)
-                    self.send_response(resp.status)
-                    self.end_headers()
-                except Exception:
+                    status, resp_body, resp_headers = self._send_upstream_request(
+                        "DELETE",
+                        use_proxy_session=self._is_streamable_http(),
+                        timeout=10,
+                    )
+                except (URLError, OSError):
                     self.send_error(502)
+                    return
+
+                if self._is_streamable_http():
+                    if self._is_session_not_found(status, resp_body):
+                        log.info("MCP session already gone for %s during DELETE; clearing proxy state", proxy.agent_name)
+                        proxy._set_upstream_session_id(None)
+                        self.send_response(204)
+                        self.end_headers()
+                        return
+                    if status < 400:
+                        proxy._set_upstream_session_id(None)
+
+                self.send_response(status)
+                self._send_response_headers(resp_headers)
+                if resp_body:
+                    self.send_header("Content-Length", str(len(resp_body)))
+                self.end_headers()
+                if resp_body:
+                    self.wfile.write(resp_body)
 
             def _rewrite_sse_endpoint(self, line: bytes) -> bytes:
                 """Rewrite upstream endpoint URLs in SSE data lines.
