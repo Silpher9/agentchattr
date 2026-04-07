@@ -13,10 +13,11 @@ ROOT = Path(__file__).parent
 def load_config(root: Path | None = None) -> dict:
     """Load config.toml and merge config.local.toml if it exists.
 
-    config.local.toml is gitignored and intended for user-specific agents
-    (e.g. local LLM endpoints) that shouldn't be committed.
-    Only the [agents] section is merged — local entries are added alongside
-    (not replacing) the agents defined in config.toml.
+    config.local.toml is gitignored and intended for user-specific overrides
+    that shouldn't be committed.
+    Merged sections:
+    - [server]: local values override main (e.g. host for Tailscale access)
+    - [agents]: local agents are added alongside (not replacing) main agents
     """
     root = root or ROOT
     config_path = root / "config.toml"
@@ -29,6 +30,11 @@ def load_config(root: Path | None = None) -> dict:
         with open(local_path, "rb") as f:
             local = tomllib.load(f)
         
+        # Merge [server] section — local overrides main for host, port, etc.
+        local_server = local.get("server", {})
+        if local_server:
+            config.setdefault("server", {}).update(local_server)
+
         # Merge [agents] section — local agents are added ONLY if they don't already exist.
         # This protects the "holy trinity" (claude, codex, gemini) from being overridden.
         local_agents = local.get("agents", {})

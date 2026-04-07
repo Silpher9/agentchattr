@@ -174,10 +174,13 @@ def _install_security_middleware(token: str, cfg: dict):
     import app as _self
     _self.session_token = token
     port = cfg.get("server", {}).get("port", 8300)
+    host = cfg.get("server", {}).get("host", "127.0.0.1")
     allowed_origins = {
         f"http://127.0.0.1:{port}",
         f"http://localhost:{port}",
     }
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        allowed_origins.add(f"http://{host}:{port}")
 
     class SecurityMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
