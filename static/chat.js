@@ -4127,6 +4127,45 @@ function initHelpTour() {
     }
 }
 
+// --- Mobile: virtual keyboard handling via visualViewport API ---
+
+function initMobileViewport() {
+    if (!window.visualViewport) return;
+    const vv = window.visualViewport;
+    const footer = document.querySelector('footer');
+    const timeline = document.getElementById('timeline');
+    if (!footer || !timeline) return;
+
+    let prevHeight = vv.height;
+
+    function onViewportResize() {
+        const keyboardOpen = vv.height < window.innerHeight * 0.75;
+        document.body.classList.toggle('keyboard-open', keyboardOpen);
+
+        if (keyboardOpen) {
+            // Offset footer so it stays above the keyboard
+            const offset = window.innerHeight - vv.height;
+            footer.style.transform = `translateY(-${offset}px)`;
+            // Shrink timeline to account for keyboard
+            timeline.style.paddingBottom = offset + 'px';
+        } else {
+            footer.style.transform = '';
+            timeline.style.paddingBottom = '';
+        }
+
+        // Keep chat scrolled to bottom when keyboard opens
+        if (vv.height < prevHeight) {
+            requestAnimationFrame(() => {
+                timeline.scrollTop = timeline.scrollHeight;
+            });
+        }
+        prevHeight = vv.height;
+    }
+
+    vv.addEventListener('resize', onViewportResize);
+    vv.addEventListener('scroll', onViewportResize);
+}
+
 // --- Start ---
 
-document.addEventListener('DOMContentLoaded', function() { init(); initHelpTour(); });
+document.addEventListener('DOMContentLoaded', function() { init(); initHelpTour(); initMobileViewport(); });

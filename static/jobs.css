@@ -1283,3 +1283,51 @@ body.archive-no-select * {
 .job-group.expanded .job-group-list {
     display: block;
 }
+
+/* --- Mobile responsive --- */
+@media (max-width: 768px) {
+    #jobs-panel {
+        width: 100% !important;
+        max-width: 100vw !important;
+        min-width: 0 !important;
+    }
+
+    .jobs-conv-input {
+        padding: 8px;
+    }
+
+    .job-input-row textarea {
+        font-size: 16px;
+        min-height: 40px;
+        padding: 8px 10px;
+    }
+
+    .job-input-row > button:last-child {
+        min-height: 40px;
+        padding: 8px 14px;
+    }
+
+    .jobs-status-toggles {
+        gap: 2px;
+    }
+
+    .job-toggle {
+        padding: 3px 6px;
+        font-size: 9px;
+    }
+}
+
+@media (max-width: 480px) {
+    .jobs-conv-header {
+        flex-wrap: wrap;
+        gap: 4px;
+    }
+
+    .jobs-conv-title {
+        font-size: 12px;
+    }
+
+    .job-card {
+        padding: 8px 10px;
+    }
+}

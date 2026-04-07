@@ -696,3 +696,33 @@
     margin-right: 6px;
     opacity: 0.7;
 }
+
+/* --- Mobile responsive --- */
+@media (max-width: 480px) {
+    .session-launcher-dialog {
+        width: calc(100vw - 16px);
+        max-height: 85vh;
+        border-radius: var(--radius-lg);
+    }
+
+    .session-launcher-goal input {
+        font-size: 16px;
+        padding: 10px;
+        min-height: 44px;
+    }
+
+    .session-tmpl-card {
+        padding: 12px;
+    }
+
+    #session-bar {
+        flex-wrap: wrap;
+        gap: 6px;
+    }
+
+    .session-end-btn,
+    .session-jump-btn {
+        min-height: 36px;
+        padding: 6px 12px;
+    }
+}
