@@ -15,6 +15,7 @@ let _launchRefreshTimer = null;
 // ---------------------------------------------------------------------------
 
 function toggleLaunchPanel() {
+    if (window._closeMobilePanels) window._closeMobilePanels('launch-panel');
     const panel = document.getElementById('launch-panel');
     panel.classList.toggle('hidden');
     document.getElementById('launch-toggle').classList.toggle('active', !panel.classList.contains('hidden'));

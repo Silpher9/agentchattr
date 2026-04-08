@@ -109,6 +109,7 @@ function handleRuleEvent(action, rule) {
 }
 
 function toggleRulesPanel() {
+    if (window._closeMobilePanels) window._closeMobilePanels('rules-panel');
     window._preserveScroll(() => {
         const panel = document.getElementById('rules-panel');
         panel.classList.toggle('hidden');

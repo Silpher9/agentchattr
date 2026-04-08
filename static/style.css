@@ -119,6 +119,7 @@ body {
     background: var(--bg);
     color: var(--text);
     height: 100vh;
+    height: 100dvh;
     overflow: hidden;
 }
 
@@ -144,6 +145,7 @@ body.high-contrast {
     display: flex;
     flex-direction: column;
     height: 100vh;
+    height: 100dvh;
 }
 
 /* --- Header --- */
@@ -4821,8 +4823,26 @@ footer {
         margin-bottom: 4px;
     }
 
-    /* Message actions: always show on mobile (no hover) */
+    /* Message actions: reposition for mobile */
     .msg-actions {
+        opacity: 0;
+        position: absolute;
+        top: -4px;
+        right: 8px;
+        flex-direction: row;
+        gap: 2px;
+        background: var(--bg-header);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 2px 4px;
+        z-index: 5;
+    }
+
+    .message {
+        position: relative;
+    }
+
+    .message:active .msg-actions {
         opacity: 1;
     }
 
@@ -4878,16 +4898,18 @@ footer {
         padding: 0 8px;
     }
 
-    /* Mention toggles: scrollable, touch-friendly */
+    /* Mention toggles: compact, single row scrollable */
     #mention-toggles {
         gap: 4px;
-        margin-bottom: 6px;
+        margin-bottom: 4px;
+        flex-wrap: nowrap;
     }
 
     .mention-toggle {
-        padding: 6px 12px;
-        font-size: 12px;
-        min-height: 32px;
+        padding: 4px 8px;
+        font-size: 11px;
+        min-height: 26px;
+        white-space: nowrap;
     }
 
     /* Schedule popover: full width */
@@ -4899,11 +4921,19 @@ footer {
         width: auto;
     }
 
-    /* Settings bar: vertical on phone */
+    /* Settings bar: scrollable overlay on phone */
     #settings-bar {
         flex-direction: column;
         gap: 8px;
         padding: 8px;
+        max-height: 50vh;
+        overflow-y: auto;
+    }
+
+    /* Pins panel: constrained on phone */
+    #pins-panel {
+        max-height: 40vh;
+        overflow-y: auto;
     }
 
     .settings-divider {
@@ -4983,5 +5013,12 @@ body.keyboard-open #app {
 @media (max-width: 768px) {
     body.panel-open {
         overflow: hidden;
+    }
+}
+
+/* --- PWA standalone safe area --- */
+@supports (padding-bottom: env(safe-area-inset-bottom)) {
+    footer {
+        padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
     }
 }

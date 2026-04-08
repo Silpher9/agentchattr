@@ -360,6 +360,7 @@ function clearJobReplyTarget(event) {
 // ---------------------------------------------------------------------------
 
 function toggleJobsPanel() {
+    if (window._closeMobilePanels) window._closeMobilePanels('jobs-panel');
     window._preserveScroll(() => {
         const panel = document.getElementById('jobs-panel');
         panel.classList.toggle('hidden');

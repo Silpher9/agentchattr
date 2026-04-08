@@ -1805,7 +1805,28 @@ function applySettings(data) {
     }
 }
 
+function _closeMobilePanels(except) {
+    if (window.innerWidth > 480) return;
+    const panels = [
+        { el: 'settings-bar', btn: 'settings-toggle' },
+        { el: 'pins-panel', btn: 'pins-toggle' },
+        { el: 'jobs-panel', btn: 'jobs-toggle' },
+        { el: 'rules-panel', btn: 'rules-toggle' },
+        { el: 'launch-panel', btn: 'launch-toggle' },
+    ];
+    for (const p of panels) {
+        if (p.el === except) continue;
+        const panel = document.getElementById(p.el);
+        const btn = document.getElementById(p.btn);
+        if (panel && !panel.classList.contains('hidden')) {
+            panel.classList.add('hidden');
+            if (btn) btn.classList.remove('active');
+        }
+    }
+}
+
 function toggleSettings() {
+    _closeMobilePanels('settings-bar');
     const bar = document.getElementById('settings-bar');
     bar.classList.toggle('hidden');
     document.getElementById('settings-toggle').classList.toggle('active', !bar.classList.contains('hidden'));
@@ -2819,6 +2840,7 @@ function handleDeleteBroadcast(ids) {
 }
 
 function togglePinsPanel() {
+    _closeMobilePanels('pins-panel');
     _preserveScroll(() => {
         const panel = document.getElementById('pins-panel');
         panel.classList.toggle('hidden');
