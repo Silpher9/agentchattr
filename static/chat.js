@@ -1839,6 +1839,26 @@ function _closeMobilePanels(except) {
     }
 }
 
+function toggleMobileAgents() {
+    const status = document.getElementById('agent-status');
+    const btn = document.getElementById('agents-mobile-toggle');
+    status.classList.toggle('mobile-open');
+    btn.classList.toggle('active', status.classList.contains('mobile-open'));
+    // Close on outside click
+    if (status.classList.contains('mobile-open')) {
+        setTimeout(() => {
+            function close(e) {
+                if (!status.contains(e.target) && e.target !== btn && !btn.contains(e.target)) {
+                    status.classList.remove('mobile-open');
+                    btn.classList.remove('active');
+                    document.removeEventListener('click', close);
+                }
+            }
+            document.addEventListener('click', close);
+        }, 0);
+    }
+}
+
 function toggleSettings() {
     _closeMobilePanels('settings-bar');
     const bar = document.getElementById('settings-bar');
@@ -2274,8 +2294,9 @@ function setupInput() {
 
     // Auto-resize + slash menu + mention menu + send button state
     function onInputChange() {
+        const maxH = window.innerWidth <= 480 ? 160 : 120;
         input.style.height = 'auto';
-        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+        input.style.height = Math.min(input.scrollHeight, maxH) + 'px';
         updateSlashMenu(input.value);
         updateMentionMenu();
         updateSendButton();
@@ -3007,8 +3028,9 @@ function toggleVoice() {
         }
         input.value = baseText + (baseText ? ' ' : '') + finalTranscript + interim;
         focusComposerInput();
+        const maxH = window.innerWidth <= 480 ? 160 : 120;
         input.style.height = 'auto';
-        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+        input.style.height = Math.min(input.scrollHeight, maxH) + 'px';
     };
 
     recognition.onerror = (e) => {
@@ -3174,6 +3196,7 @@ async function _preserveScroll(fn) {
     requestAnimationFrame(tick);
 }
 window._preserveScroll = _preserveScroll;
+window._closeMobilePanels = _closeMobilePanels;
 
 // Style #hashtags in rendered message text
 function styleHashtags(html) {

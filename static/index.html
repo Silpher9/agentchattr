@@ -11,7 +11,7 @@
     <meta name="mobile-web-app-capable" content="yes">
     <link rel="manifest" href="/static/manifest.json">
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
-    <link rel="stylesheet" href="/static/style.css?v=252">
+    <link rel="stylesheet" href="/static/style.css?v=253">
     <link rel="stylesheet" href="/static/sessions.css?v=224">
     <link rel="stylesheet" href="/static/jobs.css?v=224">
     <link rel="icon" href="/static/favicon.ico">
@@ -29,6 +29,13 @@
                 <span class="subtitle" id="room-subtitle"></span>
             </div>
             <div class="header-right">
+                <button class="settings-btn" id="agents-mobile-toggle" onclick="toggleMobileAgents()" title="Active agents">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                        <circle cx="6" cy="6" r="3" stroke="currentColor" stroke-width="1.2"/>
+                        <circle cx="11" cy="6" r="3" stroke="currentColor" stroke-width="1.2"/>
+                        <path d="M1 14c0-2.2 2.2-4 5-4s5 1.8 5 4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                    </svg>
+                </button>
                 <div id="agent-status"></div>
                 <button class="settings-btn" id="jobs-toggle" onclick="toggleJobsPanel()" title="Jobs">
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -344,7 +351,7 @@
     <script src="/static/channels.js?v=224"></script>
     <script src="/static/rules-panel.js?v=223"></script>
     <script src="/static/launch-panel.js?v=2"></script>
-    <script src="/static/chat.js?v=268"></script>
+    <script src="/static/chat.js?v=269"></script>
     <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js', {scope: '/'});
