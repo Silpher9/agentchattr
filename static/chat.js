@@ -252,6 +252,20 @@ function init() {
             document.querySelectorAll('.channel-tab.editing').forEach(t => t.classList.remove('editing'));
         }
     });
+
+    // Mobile: tap message to toggle action buttons
+    document.getElementById('messages').addEventListener('click', (e) => {
+        if (window.innerWidth > 480) return;
+        const msg = e.target.closest('.message');
+        if (!msg) return;
+        // Don't toggle if clicking an action button itself
+        if (e.target.closest('.msg-actions')) return;
+        // Close any other open actions
+        document.querySelectorAll('.message.actions-open').forEach(m => {
+            if (m !== msg) m.classList.remove('actions-open');
+        });
+        msg.classList.toggle('actions-open');
+    });
 }
 
 function renderMarkdown(text) {

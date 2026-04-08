@@ -4823,9 +4823,10 @@ footer {
         margin-bottom: 4px;
     }
 
-    /* Message actions: reposition for mobile */
+    /* Message actions: reposition for mobile — hidden until tap */
     .msg-actions {
         opacity: 0;
+        pointer-events: none;
         position: absolute;
         top: -4px;
         right: 8px;
@@ -4836,14 +4837,16 @@ footer {
         border-radius: 8px;
         padding: 2px 4px;
         z-index: 5;
+        transition: opacity 0.15s;
     }
 
     .message {
         position: relative;
     }
 
-    .message:active .msg-actions {
+    .message.actions-open .msg-actions {
         opacity: 1;
+        pointer-events: auto;
     }
 
     /* Footer: compact */
