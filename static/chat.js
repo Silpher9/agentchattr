@@ -1837,9 +1837,19 @@ function _closeMobilePanels(except) {
             if (btn) btn.classList.remove('active');
         }
     }
+    // Also close mobile agents dropdown (uses mobile-open class, not hidden)
+    if (except !== 'agent-status') {
+        const agentStatus = document.getElementById('agent-status');
+        const agentBtn = document.getElementById('agents-mobile-toggle');
+        if (agentStatus && agentStatus.classList.contains('mobile-open')) {
+            agentStatus.classList.remove('mobile-open');
+            if (agentBtn) agentBtn.classList.remove('active');
+        }
+    }
 }
 
 function toggleMobileAgents() {
+    _closeMobilePanels('agent-status');
     const status = document.getElementById('agent-status');
     const btn = document.getElementById('agents-mobile-toggle');
     status.classList.toggle('mobile-open');
@@ -2105,6 +2115,10 @@ function updateSlashMenu(text) {
             e.preventDefault();
             selectSlashCommand(item.cmd);
         });
+        row.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            selectSlashCommand(item.cmd);
+        });
         row.addEventListener('mouseenter', () => {
             slashMenuIndex = i;
             menu.querySelectorAll('.slash-item').forEach((el, j) => el.classList.toggle('active', j === i));
@@ -2190,6 +2204,10 @@ function updateMentionMenu() {
         row.dataset.name = item.name;
         row.innerHTML = `<span class="mention-dot" style="background: ${item.color}"></span><span class="mention-name">${escapeHtml(item.label)}</span>`;
         row.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            selectMention(item.name);
+        });
+        row.addEventListener('touchend', (e) => {
             e.preventDefault();
             selectMention(item.name);
         });

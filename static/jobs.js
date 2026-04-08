@@ -2040,6 +2040,10 @@ function updateJobMentionMenu() {
             e.preventDefault();
             selectJobMention(item.name);
         });
+        row.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            selectJobMention(item.name);
+        });
         row.addEventListener('mouseenter', () => {
             jobMentionIndex = i;
             menu.querySelectorAll('.mention-item').forEach((el, j) => el.classList.toggle('active', j === i));
