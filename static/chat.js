@@ -1820,7 +1820,7 @@ function applySettings(data) {
 }
 
 function _closeMobilePanels(except) {
-    if (window.innerWidth > 480) return;
+    if (window.innerWidth > 768) return;
     const panels = [
         { el: 'settings-bar', btn: 'settings-toggle' },
         { el: 'pins-panel', btn: 'pins-toggle' },

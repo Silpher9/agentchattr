@@ -4717,28 +4717,47 @@ footer {
 
 /* --- Phone --- */
 @media (max-width: 480px) {
-    /* Header: minimal */
+    /* Header: minimal — hide logo, compact agent status */
     header {
         padding: 6px 8px;
+    }
+
+    .header-logo {
+        display: none;
     }
 
     header h1 {
         font-size: 13px;
     }
 
+    .header-left {
+        gap: 4px;
+    }
+
     .header-right {
         gap: 4px;
     }
 
-    /* Agent status: much smaller */
+    /* Agent status: dots only on phone — hide labels */
     #agent-status {
-        max-width: 25vw;
-        gap: 4px;
+        max-width: none;
+        gap: 3px;
     }
 
     .status-pill {
-        padding: 3px 6px;
-        font-size: 11px;
+        padding: 3px;
+        font-size: 0;
+        min-width: 0;
+        gap: 0;
+    }
+
+    .status-pill .status-dot {
+        width: 8px;
+        height: 8px;
+    }
+
+    .status-pill .status-label {
+        display: none;
     }
 
     /* Settings buttons: proper touch targets */
@@ -4823,10 +4842,9 @@ footer {
         margin-bottom: 4px;
     }
 
-    /* Message actions: reposition for mobile — hidden until tap */
+    /* Message actions: fully hidden until tap — no layout impact */
     .msg-actions {
-        opacity: 0;
-        pointer-events: none;
+        display: none;
         position: absolute;
         top: -4px;
         right: 8px;
@@ -4837,7 +4855,6 @@ footer {
         border-radius: 8px;
         padding: 2px 4px;
         z-index: 5;
-        transition: opacity 0.15s;
     }
 
     .message {
@@ -4845,7 +4862,7 @@ footer {
     }
 
     .message.actions-open .msg-actions {
-        opacity: 1;
+        display: flex;
         pointer-events: auto;
     }
 
@@ -4901,18 +4918,9 @@ footer {
         padding: 0 8px;
     }
 
-    /* Mention toggles: compact, single row scrollable */
+    /* Mention toggles: hidden on phone — use @ in input instead */
     #mention-toggles {
-        gap: 4px;
-        margin-bottom: 4px;
-        flex-wrap: nowrap;
-    }
-
-    .mention-toggle {
-        padding: 4px 8px;
-        font-size: 11px;
-        min-height: 26px;
-        white-space: nowrap;
+        display: none;
     }
 
     /* Schedule popover: full width */
