@@ -91,7 +91,7 @@ def main():
 
     # Mount static files
     from fastapi.staticfiles import StaticFiles
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, FileResponse
 
     static_dir = ROOT / "static"
 
@@ -107,6 +107,14 @@ def main():
             f'<script>window.__SESSION_TOKEN__="{session_token}";</script>\n</head>',
         )
         return HTMLResponse(injected, headers={"Cache-Control": "no-store"})
+
+    @app.get("/sw.js")
+    async def service_worker():
+        return FileResponse(
+            static_dir / "sw.js",
+            media_type="application/javascript",
+            headers={"Service-Worker-Allowed": "/", "Cache-Control": "no-store"},
+        )
 
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
