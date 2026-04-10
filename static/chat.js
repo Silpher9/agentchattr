@@ -990,6 +990,7 @@ function applyAgentConfig(data) {
     }
     buildStatusPills();
     buildMentionToggles();
+    buildPresenceBar();  // mobile presence/quick-mention bar (issue #10)
     buildSoundSettings();
     // Re-color any messages already rendered (e.g. from a reconnect)
     recolorMessages();
@@ -1481,6 +1482,7 @@ function showPillPopover(pillEl, opts) {
         recolorMessages();
         // Rebuild mention toggles with new colors
         buildMentionToggles();
+        buildPresenceBar();
         // Update active swatch + color input highlight
         const swatchColors = [];
         popover.querySelectorAll('.color-swatch').forEach(s => {
@@ -1522,6 +1524,7 @@ function showPillPopover(pillEl, opts) {
             popover.style.setProperty('--agent-color', defaultColor);
             recolorMessages();
             buildMentionToggles();
+            buildPresenceBar();
             popover.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('active'));
             if (colorInput) colorInput.value = defaultColor;
         });
@@ -1771,6 +1774,15 @@ function updateStatus(data) {
 
         // Keep agent color in sync
         if (info.color) pill.style.setProperty('--agent-color', info.color);
+
+        // Mirror busy state to the mobile presence bar pill (issue #10).
+        // Hide offline agents from the mobile bar so it stays compact.
+        const presence = document.getElementById(`presence-${name}`);
+        if (presence) {
+            presence.classList.toggle('busy', !!(info.busy && info.available));
+            presence.style.display = info.available ? '' : 'none';
+            if (info.color) presence.style.setProperty('--agent-color', info.color);
+        }
 
         // Track role (displayed on bubbles, not on pill)
         if (info.role !== undefined) {
@@ -3011,6 +3023,64 @@ function buildMentionToggles() {
         container.appendChild(btn);
     }
     enableDragScroll(container);
+}
+
+// --- Mobile presence/quick-mention bar (issue #10) ---
+//
+// Compact pill bar shown only on phone (CSS-gated). Each pill is one
+// registered agent and combines two roles:
+//   1. tap = pre-mention via the same `activeMentions` Set used by
+//      desktop #mention-toggles (no new mention engine, no protocol change)
+//   2. visual `.busy` state = active speaker indicator, fed by the
+//      existing `status` event's `busy` flag (set by updateStatus).
+//
+// We deliberately do not reactivate the unused broadcast_typing path.
+function _presenceInitial(label, name) {
+    // 2-3 letter initial: prefer first letters of multi-word labels,
+    // otherwise the first 2 characters. Used as the visible pill text.
+    const src = (label || name || '').trim();
+    if (!src) return '?';
+    const words = src.split(/[\s_-]+/).filter(Boolean);
+    if (words.length >= 2) {
+        return (words[0][0] + words[1][0]).toUpperCase();
+    }
+    return src.slice(0, 2).toUpperCase();
+}
+
+function buildPresenceBar() {
+    const container = document.getElementById('presence-bar');
+    if (!container) return;
+    container.innerHTML = '';
+
+    for (const [name, cfg] of Object.entries(agentConfig)) {
+        if (cfg.state === 'pending') continue;  // skip pending instances
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'presence-pill';
+        pill.id = `presence-${name}`;
+        pill.dataset.agent = name;
+        pill.title = `@${name}`;
+        pill.setAttribute('aria-label', `Mention @${name}`);
+        pill.style.setProperty('--agent-color', colorOverrides[name] || cfg.color || '#888');
+        pill.innerHTML =
+            '<span class="presence-dot" aria-hidden="true"></span>' +
+            '<span class="presence-initial">' + escapeHtml(_presenceInitial(cfg.label, name)) + '</span>';
+        if (activeMentions.has(name)) pill.classList.add('active');
+        pill.onclick = () => {
+            if (activeMentions.has(name)) {
+                activeMentions.delete(name);
+                pill.classList.remove('active');
+            } else {
+                activeMentions.add(name);
+                pill.classList.add('active');
+            }
+            // Keep desktop mention-toggles in sync if both visible (mobile/desktop split via media query)
+            const sibling = document.querySelector(`#mention-toggles .mention-toggle[data-agent="${name}"]`);
+            if (sibling) sibling.classList.toggle('active', activeMentions.has(name));
+            if (typeof updateSchedulePopoverState === 'function') updateSchedulePopoverState();
+        };
+        container.appendChild(pill);
+    }
 }
 
 // --- Voice typing ---

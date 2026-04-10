@@ -3018,6 +3018,69 @@ footer {
     color: var(--agent-color, var(--accent));
 }
 
+/* --- Mobile presence/quick-mention bar (issue #10) ---
+   Hidden on desktop. Shown only at <=768px width via the mobile media block.
+   Combines two roles in one primitive:
+   - tap pill = pre-mention via shared activeMentions Set (same path as
+     desktop #mention-toggles, no new mention engine)
+   - subtle pulse on .busy = active speaker presence (driven by status.busy
+     from updateStatus, no dead typing path)
+*/
+#presence-bar {
+    display: none;  /* hidden by default; mobile media query enables it */
+}
+
+.presence-pill {
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    color: var(--text-dim);
+    padding: 4px 10px;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    cursor: pointer;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+    transition: background 0.18s, border-color 0.18s, color 0.18s;
+    -webkit-tap-highlight-color: transparent;
+}
+
+.presence-pill .presence-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--agent-color, var(--accent));
+    flex-shrink: 0;
+}
+
+.presence-pill .presence-initial {
+    text-transform: uppercase;
+}
+
+.presence-pill.active {
+    background: color-mix(in srgb, var(--agent-color, var(--accent)) 22%, transparent);
+    border-color: var(--agent-color, var(--accent));
+    color: var(--agent-color, var(--accent));
+}
+
+/* Subtle pulse on the colored dot when the agent is busy.
+   Animates only the dot — keeps the pill calm and readable. */
+.presence-pill.busy .presence-dot {
+    box-shadow: 0 0 0 0 var(--agent-color, var(--accent));
+    animation: presence-pulse 1.6s ease-out infinite;
+}
+
+@keyframes presence-pulse {
+    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--agent-color, var(--accent)) 60%, transparent); }
+    70%  { box-shadow: 0 0 0 6px color-mix(in srgb, var(--agent-color, var(--accent)) 0%, transparent); }
+    100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--agent-color, var(--accent)) 0%, transparent); }
+}
+
 #attachments {
     display: flex;
     gap: 8px;
@@ -4925,10 +4988,27 @@ footer {
         padding: 0 8px;
     }
 
-    /* Mention toggles: hidden on phone — use @ in input instead */
+    /* Mention toggles: hidden on phone — replaced by #presence-bar above the channel-bar (issue #10) */
     #mention-toggles {
         display: none;
     }
+
+    /* Mobile presence/quick-mention bar: visible only on phone, just below the header.
+       Horizontaal scrollbaar bij veel agents. */
+    #presence-bar {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+        padding: 6px 8px;
+        background: var(--bg-deep, var(--bg-subtle));
+        border-bottom: 1px solid var(--border);
+        overflow-x: auto;
+        scrollbar-width: none;
+        -webkit-overflow-scrolling: touch;
+        flex-shrink: 0;
+    }
+    #presence-bar::-webkit-scrollbar { display: none; }
+    #presence-bar:empty { display: none; }
 
     /* Schedule popover: full width */
     .schedule-popover {

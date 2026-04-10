@@ -11,7 +11,7 @@
     <meta name="mobile-web-app-capable" content="yes">
     <link rel="manifest" href="/static/manifest.json">
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
-    <link rel="stylesheet" href="/static/style.css?v=254">
+    <link rel="stylesheet" href="/static/style.css?v=255">
     <link rel="stylesheet" href="/static/sessions.css?v=224">
     <link rel="stylesheet" href="/static/jobs.css?v=224">
     <link rel="icon" href="/static/favicon.ico">
@@ -148,6 +148,10 @@
             </div>
             <div id="pins-list"></div>
         </div>
+
+        <!-- Mobile-only presence/quick-mention bar (issue #10).
+             Hidden on desktop via CSS; shown only at <=768px width. -->
+        <div id="presence-bar" aria-label="Active agents — tap to mention"></div>
 
         <div id="channel-bar">
             <div class="channel-bar-left-spacer" aria-hidden="true"></div>
@@ -351,7 +355,7 @@
     <script src="/static/channels.js?v=224"></script>
     <script src="/static/rules-panel.js?v=223"></script>
     <script src="/static/launch-panel.js?v=2"></script>
-    <script src="/static/chat.js?v=270"></script>
+    <script src="/static/chat.js?v=271"></script>
     <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js', {scope: '/'});
