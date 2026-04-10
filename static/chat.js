@@ -8,6 +8,8 @@ let ws = null;
 let pendingAttachments = [];
 let autoScroll = true;
 let reconnectTimer = null;
+let connectWatchdog = null;  // safety net if `status` event never arrives after WS connect
+const CONNECT_WATCHDOG_MS = 12000;  // ~12s — generous for slow mobile/cellular history loads
 let username = 'user';
 let agentConfig = {};  // { name: { color, label } } — registered instances (used for pills)
 let baseColors = {};   // { name: { color, label } } — base agent colors (for message coloring)
@@ -383,6 +385,19 @@ function connectWebSocket() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(SESSION_TOKEN)}`);
 
+    // Safety net: if `status` event never arrives (e.g. dropped frame, stalled
+    // mobile WS, server hung mid-history), the loading-indicator would otherwise
+    // hang forever. After CONNECT_WATCHDOG_MS we force a clean reconnect via
+    // ws.close(), which routes through onclose → re-show loader → reconnect.
+    // This is a graceful recovery, not a cosmetic loader hide.
+    if (connectWatchdog) clearTimeout(connectWatchdog);
+    connectWatchdog = setTimeout(() => {
+        if (!soundEnabled) {
+            console.warn('Connect watchdog: no status event after ' + CONNECT_WATCHDOG_MS + 'ms, forcing reconnect');
+            try { ws.close(); } catch (e) { /* ignore */ }
+        }
+    }, CONNECT_WATCHDOG_MS);
+
     ws.onopen = () => {
         console.log('WebSocket connected');
         if (reconnectTimer) {
@@ -493,6 +508,10 @@ function connectWebSocket() {
             if (window.updateLaunchStatus) window.updateLaunchStatus(event.data);
             // Status is the last event sent on connect — enable sounds after history
             if (!soundEnabled) {
+                if (connectWatchdog) {
+                    clearTimeout(connectWatchdog);
+                    connectWatchdog = null;
+                }
                 soundEnabled = true;
                 const loader = document.getElementById('loading-indicator');
                 if (loader) loader.classList.add('hidden');
@@ -617,6 +636,10 @@ function connectWebSocket() {
             return;
         }
         console.log('Disconnected, reconnecting in 2s...');
+        if (connectWatchdog) {
+            clearTimeout(connectWatchdog);
+            connectWatchdog = null;
+        }
         soundEnabled = false;  // suppress sounds during reconnect history replay
         const loader = document.getElementById('loading-indicator');
         if (loader) loader.classList.remove('hidden');
@@ -756,6 +779,9 @@ function appendMessage(msg) {
         el.classList.add('system-msg');
         el.innerHTML = `<span class="msg-text">${escapeHtml(msg.text)}</span>`;
     } else {
+        // Defensive: edge-case messages (e.g. attachment-only) may have no text.
+        // Coerce to '' here so the rest of this branch can safely call string methods.
+        if (msg.text == null) msg.text = '';
         const isError = msg.text.startsWith('[') && msg.text.includes('error');
         if (isError) el.classList.add('error-msg');
 
