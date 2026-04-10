@@ -3068,17 +3068,36 @@ footer {
     color: var(--agent-color, var(--accent));
 }
 
-/* Subtle pulse on the colored dot when the agent is busy.
-   Animates only the dot — keeps the pill calm and readable. */
+/* Busy pulse on the colored dot when the agent is actively speaking.
+   Issue #12: the #10 version pulsed in --agent-color at 60% alpha, which
+   washed out against the dark presence-bar background — Ingmar had to
+   stare at the dots to see who was active. Switched the pulse and a thin
+   persistent halo to white for much higher contrast, while still only
+   animating the dot so the pill stays calm and the rest of the #10 layout
+   is untouched. */
 .presence-pill.busy .presence-dot {
-    box-shadow: 0 0 0 0 var(--agent-color, var(--accent));
-    animation: presence-pulse 1.6s ease-out infinite;
+    box-shadow:
+        0 0 0 1.5px rgba(255, 255, 255, 0.72),
+        0 0 0 0 rgba(255, 255, 255, 0.85);
+    animation: presence-pulse 1.3s ease-out infinite;
 }
 
 @keyframes presence-pulse {
-    0%   { box-shadow: 0 0 0 0 color-mix(in srgb, var(--agent-color, var(--accent)) 60%, transparent); }
-    70%  { box-shadow: 0 0 0 6px color-mix(in srgb, var(--agent-color, var(--accent)) 0%, transparent); }
-    100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--agent-color, var(--accent)) 0%, transparent); }
+    0% {
+        box-shadow:
+            0 0 0 1.5px rgba(255, 255, 255, 0.72),
+            0 0 0 0 rgba(255, 255, 255, 0.85);
+    }
+    70% {
+        box-shadow:
+            0 0 0 1.5px rgba(255, 255, 255, 0.72),
+            0 0 0 10px rgba(255, 255, 255, 0);
+    }
+    100% {
+        box-shadow:
+            0 0 0 1.5px rgba(255, 255, 255, 0.72),
+            0 0 0 0 rgba(255, 255, 255, 0);
+    }
 }
 
 #attachments {
