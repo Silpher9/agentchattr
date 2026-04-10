@@ -4790,6 +4790,15 @@ footer {
         font-size: 14px;
     }
 
+    /* Issue #11: hide the composer placeholder on mobile. Ingmar found
+       the "Type a message..." hint inside the textvak onnodig druk/lelijk
+       op mobiel. The HTML placeholder attribute stays in place so desktop
+       and screen readers still see it; we simply render it transparent
+       whenever the tablet/phone media query matches. */
+    #input::placeholder {
+        color: transparent;
+    }
+
     /* Settings bar: wrap better */
     #settings-bar {
         gap: 10px;

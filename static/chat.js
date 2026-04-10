@@ -2333,7 +2333,9 @@ function setupInput() {
                 e.preventDefault();
                 const active = items[slashMenuIndex];
                 if (active) selectSlashCommand(active.querySelector('.slash-cmd').textContent);
-                if (e.key === 'Enter') sendMessage();
+                // Issue #11: don't auto-send the selected slash command on mobile.
+                // Desktop keeps the existing "pick + send" convenience.
+                if (e.key === 'Enter' && window.innerWidth > 768) sendMessage();
                 return;
             }
             if (e.key === 'Escape') {
@@ -2343,6 +2345,11 @@ function setupInput() {
             }
         }
         if (e.key === 'Enter' && !e.shiftKey) {
+            // Issue #11: on mobile the soft-keyboard Enter should not submit —
+            // the user must tap the explicit Send button. We bail out early so
+            // the textarea keeps its default behavior and Enter just inserts a
+            // newline. Desktop (>768px) keeps the existing Enter-to-send path.
+            if (window.innerWidth <= 768) return;
             e.preventDefault();
             sendMessage();
         }
