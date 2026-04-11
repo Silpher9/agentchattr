@@ -56,7 +56,11 @@ function renderChannelTabs() {
             tab.appendChild(dot);
         }
 
-        // Edit + delete icons for non-general tabs (visible on hover via CSS)
+        // Issue #13: edit + archive icons for non-general tabs (visible
+        // on hover via CSS). The destructive trash icon is no longer on
+        // active tabs — it only appears inside the archived-channels
+        // popover as "Delete permanently" for channels that have
+        // already been archived.
         if (name !== 'general') {
             const actions = document.createElement('span');
             actions.className = 'channel-tab-actions';
@@ -68,12 +72,13 @@ function renderChannelTabs() {
             editBtn.onclick = (e) => { e.stopPropagation(); showChannelRenameDialog(name); };
             actions.appendChild(editBtn);
 
-            const delBtn = document.createElement('button');
-            delBtn.className = 'ch-delete-btn';
-            delBtn.title = 'Delete';
-            delBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M3 4h10M6 4V3h4v1M5 4v8.5h6V4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-            delBtn.onclick = (e) => { e.stopPropagation(); deleteChannel(name); };
-            actions.appendChild(delBtn);
+            const archBtn = document.createElement('button');
+            archBtn.className = 'ch-archive-btn';
+            archBtn.title = 'Archive (hide from tabs, history kept)';
+            // Box/archive icon
+            archBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 16 16" fill="none"><path d="M2 4h12v3H2V4zM3 7h10v6H3V7zM6.5 9.5h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+            archBtn.onclick = (e) => { e.stopPropagation(); archiveChannel(name); };
+            actions.appendChild(archBtn);
 
             tab.appendChild(actions);
         }
@@ -345,6 +350,178 @@ function deleteChannel(name) {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #13: Archive / Unarchive / Delete permanently
+// ---------------------------------------------------------------------------
+//
+// Archive is reversible (one-click, no confirm needed — user can
+// unarchive from the archived-list popover any time).
+// Unarchive is also one-click; the server enforces the collision and
+// cap guards and sends back `channel_unarchive_error` on failure.
+// Delete permanently is the only destructive path and only reachable
+// from the archived-list with an inline 2-step confirm.
+
+function archiveChannel(name) {
+    if (name === 'general') return;
+    if (!window.ws) return;
+    window.ws.send(JSON.stringify({ type: 'channel_archive', name }));
+    // If the user was looking at the channel they just archived,
+    // bounce them to general so the timeline is never stuck on a
+    // read-only channel after the settings broadcast lands.
+    if (window.activeChannel === name) switchChannel('general');
+}
+
+function unarchiveChannel(name) {
+    if (!window.ws) return;
+    window.ws.send(JSON.stringify({ type: 'channel_unarchive', name }));
+}
+
+function deleteArchivedChannel(name) {
+    if (!window.ws) return;
+    window.ws.send(JSON.stringify({ type: 'channel_delete', name }));
+}
+
+function renderArchivedList() {
+    // Update the trigger button visibility + label.
+    const btn = document.getElementById('channel-archived-btn');
+    const list = Array.isArray(window.archivedChannelList)
+        ? window.archivedChannelList
+        : [];
+    if (btn) {
+        if (list.length === 0) {
+            btn.classList.add('hidden');
+        } else {
+            btn.classList.remove('hidden');
+            btn.title = `${list.length} archived channel${list.length === 1 ? '' : 's'}`;
+        }
+    }
+
+    // If the popover is open, re-render its body.
+    const popover = document.getElementById('channel-archived-popover');
+    if (!popover || popover.classList.contains('hidden')) return;
+
+    const body = popover.querySelector('.archived-popover-body');
+    if (!body) return;
+    body.innerHTML = '';
+
+    if (list.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'archived-empty';
+        empty.textContent = 'No archived channels.';
+        body.appendChild(empty);
+        return;
+    }
+
+    for (const entry of list) {
+        const name = typeof entry === 'string' ? entry : entry.name;
+        const archivedBy = typeof entry === 'object' ? (entry.archived_by || '') : '';
+        const archivedAt = typeof entry === 'object' ? entry.archived_at : null;
+
+        const row = document.createElement('div');
+        row.className = 'archived-row';
+        row.dataset.channel = name;
+
+        const label = document.createElement('div');
+        label.className = 'archived-row-label';
+        const nameEl = document.createElement('span');
+        nameEl.className = 'archived-row-name';
+        nameEl.textContent = '# ' + name;
+        label.appendChild(nameEl);
+        if (archivedAt || archivedBy) {
+            const meta = document.createElement('span');
+            meta.className = 'archived-row-meta';
+            const parts = [];
+            if (archivedAt) {
+                try {
+                    const d = new Date(archivedAt * 1000);
+                    parts.push(d.toLocaleDateString());
+                } catch (_) { /* ignore */ }
+            }
+            if (archivedBy) parts.push('by ' + archivedBy);
+            meta.textContent = parts.join(' · ');
+            label.appendChild(meta);
+        }
+        row.appendChild(label);
+
+        const actions = document.createElement('div');
+        actions.className = 'archived-row-actions';
+
+        const unarchBtn = document.createElement('button');
+        unarchBtn.className = 'archived-action archived-action-unarchive';
+        unarchBtn.textContent = 'Unarchive';
+        unarchBtn.onclick = (e) => { e.stopPropagation(); unarchiveChannel(name); };
+        actions.appendChild(unarchBtn);
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'archived-action archived-action-delete';
+        delBtn.textContent = 'Delete permanently';
+        delBtn.onclick = (e) => {
+            e.stopPropagation();
+            // Inline 2-step confirm for the destructive path.
+            if (row.classList.contains('confirm-delete')) return;
+            row.classList.add('confirm-delete');
+            const originalText = delBtn.textContent;
+            delBtn.textContent = 'Confirm delete?';
+            unarchBtn.style.display = 'none';
+
+            const cancelBtn = document.createElement('button');
+            cancelBtn.className = 'archived-action archived-action-cancel';
+            cancelBtn.textContent = 'Cancel';
+            actions.appendChild(cancelBtn);
+
+            const revert = () => {
+                row.classList.remove('confirm-delete');
+                delBtn.textContent = originalText;
+                unarchBtn.style.display = '';
+                cancelBtn.remove();
+                delBtn.onclick = (ev) => {
+                    ev.stopPropagation();
+                    deleteArchivedChannel(name);
+                };
+            };
+
+            // Swap the onclick so the next click fires the delete.
+            delBtn.onclick = (ev) => {
+                ev.stopPropagation();
+                deleteArchivedChannel(name);
+            };
+            cancelBtn.onclick = (ev) => { ev.stopPropagation(); revert(); };
+        };
+        actions.appendChild(delBtn);
+
+        row.appendChild(actions);
+        body.appendChild(row);
+    }
+}
+
+function toggleArchivedPopover(force) {
+    const popover = document.getElementById('channel-archived-popover');
+    if (!popover) return;
+    const willShow = force !== undefined
+        ? force
+        : popover.classList.contains('hidden');
+    if (willShow) {
+        popover.classList.remove('hidden');
+        renderArchivedList();
+        // Close on outside click
+        setTimeout(() => {
+            document.addEventListener('click', _archivedPopoverOutsideClick);
+        }, 0);
+    } else {
+        popover.classList.add('hidden');
+        document.removeEventListener('click', _archivedPopoverOutsideClick);
+    }
+}
+
+function _archivedPopoverOutsideClick(e) {
+    const popover = document.getElementById('channel-archived-popover');
+    const btn = document.getElementById('channel-archived-btn');
+    if (!popover) return;
+    if (popover.contains(e.target)) return;
+    if (btn && btn.contains(e.target)) return;
+    toggleArchivedPopover(false);
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
@@ -363,4 +540,9 @@ window.filterMessagesByChannel = filterMessagesByChannel;
 window.renderChannelTabs = renderChannelTabs;
 window.deleteChannel = deleteChannel;
 window.showChannelRenameDialog = showChannelRenameDialog;
+window.archiveChannel = archiveChannel;
+window.unarchiveChannel = unarchiveChannel;
+window.deleteArchivedChannel = deleteArchivedChannel;
+window.renderArchivedList = renderArchivedList;
+window.toggleArchivedPopover = toggleArchivedPopover;
 window.Channels = { init: _channelsInit };

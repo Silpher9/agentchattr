@@ -158,6 +158,20 @@
             <div class="channel-main">
                 <div id="channel-tabs"></div>
                 <button id="channel-add-btn" class="channel-add" onclick="showChannelCreateDialog()" title="Add channel">+</button>
+                <!-- Issue #13: archived channels popover trigger.
+                     Hidden when there are no archived channels. -->
+                <button id="channel-archived-btn" class="channel-archived-btn hidden" onclick="toggleArchivedPopover()" title="Archived channels" aria-label="Archived channels">
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M2 4h12v3H2V4zM3 7h10v6H3V7zM6.5 9.5h3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+                <div id="channel-archived-popover" class="channel-archived-popover hidden" role="dialog" aria-label="Archived channels">
+                    <div class="archived-popover-header">
+                        <span>Archived channels</span>
+                        <button class="archived-popover-close" onclick="toggleArchivedPopover(false)" aria-label="Close">&#10005;</button>
+                    </div>
+                    <div class="archived-popover-body"></div>
+                </div>
             </div>
             <div class="channel-bar-right">
                 <a id="update-pill" class="update-pill hidden" href="" target="_blank" rel="noopener"></a>

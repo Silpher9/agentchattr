@@ -24,6 +24,10 @@ let soundEnabled = false;  // suppress sounds during initial history load
 let activeChannel = localStorage.getItem('agentchattr-channel') || 'general';
 let channelList = ['general'];
 let channelUnread = {};  // { channelName: count }
+// Issue #13: archived channels live in a parallel list; each entry is
+// {name, archived_at, archived_by}. The tab bar only shows active
+// channels; archived channels surface via the archived-list popover.
+let archivedChannelList = [];
 let agentHats = {};  // { agent_name: svg_string }
 window.customRoles = [];  // saved custom roles from settings
 let colorOverrides = JSON.parse(localStorage.getItem('agentchattr-color-overrides') || '{}');
@@ -35,6 +39,10 @@ Object.defineProperty(window, 'SESSION_TOKEN', { get() { return SESSION_TOKEN; }
 Object.defineProperty(window, 'activeChannel', { get() { return activeChannel; } });
 Object.defineProperty(window, 'channelList', { get() { return channelList; }, set(v) { channelList = v; } });
 Object.defineProperty(window, 'channelUnread', { get() { return channelUnread; }, set(v) { channelUnread = v; } });
+Object.defineProperty(window, 'archivedChannelList', {
+    get() { return archivedChannelList; },
+    set(v) { archivedChannelList = Array.isArray(v) ? v : []; },
+});
 window._setActiveChannel = function(v) { activeChannel = v; };
 window._setPendingChannelSwitch = function(v) { pendingChannelSwitch = v; };
 // scrollToBottom is set after function definition (see below)
@@ -571,6 +579,38 @@ function connectWebSocket() {
                 localStorage.setItem('agentchattr-channel', event.new_name);
                 Store.set('activeChannel', event.new_name);
             }
+        } else if (
+            event.type === 'channel_unarchive_error'
+            || event.type === 'channel_create_error'
+            || event.type === 'channel_rename_error'
+            || event.type === 'channel_delete_error'
+            || event.type === 'channel_archived_write_error'
+        ) {
+            // Issue #13: surface server-side channel operation errors
+            // as toasts so the user gets a clear reason when an action
+            // on an active or archived channel is refused.
+            const reason = event.error || 'unknown';
+            const humanReasons = {
+                not_archived: 'That channel is not archived.',
+                name_collision: 'A channel with that name already exists.',
+                cap_full: 'Active channel limit reached — archive another first.',
+                name_in_archived: 'That name is already used by an archived channel.',
+                active_and_archived_collision:
+                    'That name exists in both active and archived lists — refusing delete.',
+                active_channel_must_archive_first:
+                    'Active channels must be archived before permanent deletion.',
+                channel_archived:
+                    'That channel is archived (read-only).',
+            };
+            const base = humanReasons[reason] || `Channel action refused: ${reason}`;
+            const prefix = {
+                channel_unarchive_error: 'Unarchive failed',
+                channel_create_error: 'Create failed',
+                channel_rename_error: 'Rename failed',
+                channel_delete_error: 'Delete failed',
+                channel_archived_write_error: 'Write refused',
+            }[event.type] || 'Channel error';
+            showToast(`${prefix}: ${base}`, 'error');
         } else if (event.type === 'edit') {
             // A message was edited/demoted — re-render it in place
             const updatedMsg = event.message;
@@ -1840,7 +1880,7 @@ function applySettings(data) {
     }
     if (data.channels && Array.isArray(data.channels)) {
         channelList = data.channels;
-        // If active channel was deleted, switch to general
+        // If active channel was deleted or archived, switch to general
         if (!channelList.includes(activeChannel)) {
             activeChannel = 'general';
             localStorage.setItem('agentchattr-channel', 'general');
@@ -1853,6 +1893,15 @@ function applySettings(data) {
             const name = pendingChannelSwitch;
             pendingChannelSwitch = null;
             switchChannel(name);
+        }
+    }
+    // Issue #13: archived_channels travels alongside channels in the
+    // settings broadcast. Update the parallel list and re-render the
+    // archived popover so the trigger button and body stay in sync.
+    if (Array.isArray(data.archived_channels)) {
+        archivedChannelList = data.archived_channels;
+        if (typeof window.renderArchivedList === 'function') {
+            window.renderArchivedList();
         }
     }
 }

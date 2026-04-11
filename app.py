@@ -1489,10 +1489,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 # Issue #13 blocker fix: defensive guard for the
                 # "impossible state" where the same name sits in both
                 # channels and archived_channels. channel_create and
-                # channel_rename now reject that collision, but if an
+                # channel_rename reject that collision, but if an
                 # older settings.json loads with the bad state we must
-                # refuse delete rather than let the archived-first
-                # branch wipe data on a still-visible active channel.
+                # refuse delete rather than let either branch wipe
+                # data on a still-visible active channel.
                 archived_has = _is_channel_archived(name)
                 active_has = name in room_settings.get("channels", [])
                 if archived_has and active_has:
@@ -1505,12 +1505,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     except Exception:
                         pass
                     continue
-                # Issue #13: `channel_delete` is now the hard-destructive
-                # path. It stays reachable for active channels during the
-                # backend build (steps 1-5); the frontend in step 6 will
-                # only wire it up from the archived-list and the
-                # tightened guard (reject active, require archived) will
-                # land in that same commit together with the UI change.
+                # Issue #13 step 6: channel_delete is now the hard-
+                # destructive path and is ONLY reachable on channels
+                # that are already archived. Trying to delete an active
+                # channel is refused with a client-scoped error — the
+                # UI now routes active-channel removal through
+                # channel_archive instead.
+                if active_has:
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "channel_delete_error",
+                            "name": name,
+                            "error": "active_channel_must_archive_first",
+                        }))
+                    except Exception:
+                        pass
+                    continue
                 if archived_has:
                     room_settings["archived_channels"] = [
                         ac for ac in room_settings.get("archived_channels", [])
@@ -1523,16 +1533,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     _save_settings()
                     await broadcast_settings()
                     continue
-                if name not in room_settings["channels"]:
-                    continue
-                room_settings["channels"].remove(name)
-                store.delete_channel(name)
-                rules.delete_channel(name)
-                rules.set_channels(room_settings["channels"])
-                import mcp_bridge
-                mcp_bridge.migrate_cursors_delete(name)
-                _save_settings()
-                await broadcast_settings()
+                # Name is in neither list — silent no-op, same as
+                # previous behavior for unknown channels.
 
             elif event.get("type") == "channel_archive":
                 # Issue #13: move an active channel into `archived_channels`

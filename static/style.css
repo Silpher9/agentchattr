@@ -1400,6 +1400,144 @@ main#timeline {
 .channel-tab-actions button:hover { background: var(--white-08); }
 .channel-tab-actions .ch-edit-btn:hover { color: var(--text); }
 .channel-tab-actions .ch-delete-btn:hover { color: var(--error-color); }
+/* Issue #13: archive button on active channel tabs. Non-destructive
+   hover so users distinguish it from the trash icon (which now only
+   lives in the archived-channels popover). */
+.channel-tab-actions .ch-archive-btn:hover { color: var(--text); }
+
+/* Issue #13: archived-channels trigger button + popover */
+.channel-archived-btn {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 4px 6px;
+    border-radius: var(--radius-md);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+    margin-left: 2px;
+}
+.channel-archived-btn:hover {
+    background: var(--white-06);
+    color: var(--text);
+}
+.channel-archived-btn.hidden { display: none; }
+
+.channel-archived-popover {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 4px;
+    min-width: 300px;
+    max-width: 420px;
+    max-height: 360px;
+    overflow-y: auto;
+    background: var(--bg-panel, var(--bg-header));
+    border: 1px solid var(--border-color, var(--white-08));
+    border-radius: var(--radius-md);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    z-index: 200;
+    padding: 8px 0;
+}
+.channel-archived-popover.hidden { display: none; }
+
+.archived-popover-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 12px 8px 12px;
+    border-bottom: 1px solid var(--white-06);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+.archived-popover-close {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: var(--radius-sm);
+    font-size: 14px;
+}
+.archived-popover-close:hover { background: var(--white-08); color: var(--text); }
+
+.archived-popover-body {
+    padding: 4px 0;
+}
+.archived-empty {
+    padding: 12px;
+    color: var(--text-dim);
+    font-size: 13px;
+    text-align: center;
+    font-style: italic;
+}
+
+.archived-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--white-04, rgba(255, 255, 255, 0.04));
+}
+.archived-row:last-child { border-bottom: none; }
+.archived-row-label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+.archived-row-name {
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.archived-row-meta {
+    color: var(--text-dim);
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.archived-row-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+.archived-action {
+    background: var(--white-06);
+    border: 1px solid var(--white-08);
+    color: var(--text);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-family: inherit;
+}
+.archived-action:hover { background: var(--white-10, rgba(255, 255, 255, 0.12)); }
+.archived-action-unarchive:hover { color: var(--user-color); }
+.archived-action-delete {
+    color: var(--error-color);
+}
+.archived-action-delete:hover {
+    background: color-mix(in srgb, var(--error-color) 15%, transparent);
+}
+.archived-row.confirm-delete .archived-action-delete {
+    background: var(--error-color);
+    color: var(--text-on-accent, #fff);
+    border-color: var(--error-color);
+}
+.archived-action-cancel {
+    color: var(--text-dim);
+}
 
 /* Add button — sits after tabs */
 .channel-add {
