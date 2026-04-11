@@ -18,7 +18,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from store import MessageStore
 from rules import RuleStore
 from summaries import SummaryStore
-from jobs import JobStore
+from jobs import JobStore, PAUSE_REASON_CHANNEL_ARCHIVED
 from schedules import ScheduleStore, parse_schedule_spec
 from router import Router
 from agents import AgentTrigger
@@ -54,6 +54,10 @@ room_settings: dict = {
     "username": "user",
     "font": "sans",
     "channels": ["general"],
+    # Issue #13: archived (read-only) channels live alongside the
+    # active channels list. Entries are dicts of the form
+    # {"name": str, "archived_at": float, "archived_by": str}.
+    "archived_channels": [],
     "history_limit": "all",
     "contrast": "normal",
     "custom_roles": [],
@@ -140,6 +144,12 @@ def _load_settings():
         room_settings["channels"] = ["general"]
     elif "general" not in room_settings["channels"]:
         room_settings["channels"].insert(0, "general")
+    # Issue #13: backwards-compat default — older settings.json has no
+    # archived_channels key; coerce to empty list so consumers can rely
+    # on the type. Do not rewrite the file here; _save_settings will
+    # persist the key on the next write.
+    if not isinstance(room_settings.get("archived_channels"), list):
+        room_settings["archived_channels"] = []
 
 
 def _save_settings():
@@ -1403,6 +1413,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 name = (event.get("name") or "").strip().lower()
                 if name == "general":
                     continue
+                # Issue #13: `channel_delete` is now the hard-destructive
+                # path. It stays reachable for active channels during the
+                # backend build (steps 1-5); the frontend in step 6 will
+                # only wire it up from the archived-list and the
+                # tightened guard (reject active, require archived) will
+                # land in that same commit together with the UI change.
+                if name in [
+                    ac.get("name") if isinstance(ac, dict) else ac
+                    for ac in room_settings.get("archived_channels", [])
+                ]:
+                    room_settings["archived_channels"] = [
+                        ac for ac in room_settings.get("archived_channels", [])
+                        if (ac.get("name") if isinstance(ac, dict) else ac) != name
+                    ]
+                    store.delete_channel(name)
+                    rules.delete_channel(name)
+                    import mcp_bridge
+                    mcp_bridge.migrate_cursors_delete(name)
+                    _save_settings()
+                    await broadcast_settings()
+                    continue
                 if name not in room_settings["channels"]:
                     continue
                 room_settings["channels"].remove(name)
@@ -1411,6 +1442,94 @@ async def websocket_endpoint(websocket: WebSocket):
                 rules.set_channels(room_settings["channels"])
                 import mcp_bridge
                 mcp_bridge.migrate_cursors_delete(name)
+                _save_settings()
+                await broadcast_settings()
+
+            elif event.get("type") == "channel_archive":
+                # Issue #13: move an active channel into `archived_channels`
+                # without dataverlies. Jobs and active sessions on that
+                # channel are paused with reason `channel_archived`; the
+                # underlying message/rule/summary stores are untouched.
+                name = (event.get("name") or "").strip().lower()
+                if name == "general":
+                    continue
+                if name not in room_settings["channels"]:
+                    continue
+                # Reject if somehow already archived (defensive — should
+                # never happen since active and archived are disjoint).
+                already_archived = any(
+                    (ac.get("name") if isinstance(ac, dict) else ac) == name
+                    for ac in room_settings.get("archived_channels", [])
+                )
+                if already_archived:
+                    continue
+                import time as _time
+                room_settings["channels"].remove(name)
+                room_settings.setdefault("archived_channels", []).append({
+                    "name": name,
+                    "archived_at": _time.time(),
+                    "archived_by": (
+                        (event.get("archived_by") or "").strip()
+                        or room_settings.get("username", "user")
+                    ),
+                })
+                # Pause channel-scoped jobs and active sessions.
+                if jobs is not None:
+                    jobs.pause_channel_jobs(name, PAUSE_REASON_CHANNEL_ARCHIVED)
+                if session_store is not None:
+                    session_store.pause_channel_sessions(name, PAUSE_REASON_CHANNEL_ARCHIVED)
+                rules.set_channels(room_settings["channels"])
+                _save_settings()
+                await broadcast_settings()
+
+            elif event.get("type") == "channel_unarchive":
+                # Issue #13: move an archived channel back to the active
+                # list. Guards: name must be free in the active list
+                # (no rename-flow in MVP) and the active cap must have
+                # room. On any failure we send a client-scoped error so
+                # the UI can surface it; channel state is not changed.
+                name = (event.get("name") or "").strip().lower()
+                archived_list = room_settings.get("archived_channels", [])
+                match_idx = next(
+                    (i for i, ac in enumerate(archived_list)
+                     if (ac.get("name") if isinstance(ac, dict) else ac) == name),
+                    -1,
+                )
+                if match_idx == -1:
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "channel_unarchive_error",
+                            "name": name,
+                            "error": "not_archived",
+                        }))
+                    except Exception:
+                        pass
+                    continue
+                if name in room_settings["channels"]:
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "channel_unarchive_error",
+                            "name": name,
+                            "error": "name_collision",
+                        }))
+                    except Exception:
+                        pass
+                    continue
+                if len(room_settings["channels"]) >= MAX_CHANNELS:
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "channel_unarchive_error",
+                            "name": name,
+                            "error": "cap_full",
+                        }))
+                    except Exception:
+                        pass
+                    continue
+                room_settings["channels"].append(name)
+                room_settings["archived_channels"] = [
+                    ac for i, ac in enumerate(archived_list) if i != match_idx
+                ]
+                rules.set_channels(room_settings["channels"])
                 _save_settings()
                 await broadcast_settings()
 
