@@ -408,6 +408,69 @@ class ArchiveRoundTripTests(unittest.TestCase):
         self.assertEqual(report["archived_channels"]["skipped"], [])
         self.assertEqual(target_archived, [])
 
+    def test_archived_channel_with_data_stays_archived_on_import(self):
+        """Regression test for the stap-5 blocker that @codex2 flagged:
+
+        When the source export contains messages, jobs, and summaries
+        scoped to a channel that is ALSO in archived_channels, importing
+        that zip into a fresh target must restore both the archive
+        state AND the historical data — the archived channel must not
+        auto-promote to active via resolve_channel().
+        """
+        # Seed source with data on "planning" and archive that channel.
+        seed_history(
+            self.source_store,
+            self.source_jobs,
+            self.source_rules,
+            self.source_summaries,
+        )
+        source_archived = [
+            {"name": "planning", "archived_at": 1712836800.0, "archived_by": "Ingmar"},
+        ]
+        blob = archive.build_export(
+            self.source_store,
+            self.source_jobs,
+            self.source_rules,
+            self.source_summaries,
+            app_version="test",
+            archived_channels=source_archived,
+        )
+
+        # Import into a fresh target with only "general" active.
+        channel_list = ["general"]
+        target_archived: list = []
+        report = archive.import_archive(
+            blob,
+            self.target_store,
+            self.target_jobs,
+            self.target_rules,
+            self.target_summaries,
+            channel_list,
+            max_channels=8,
+            archived_channels=target_archived,
+        )
+
+        self.assertTrue(report["ok"])
+        # The archived channel landed in archived, not active.
+        self.assertNotIn("planning", channel_list)
+        self.assertEqual(channel_list, ["general"])
+        self.assertEqual(len(target_archived), 1)
+        self.assertEqual(target_archived[0]["name"], "planning")
+        self.assertEqual(target_archived[0]["archived_by"], "Ingmar")
+        # resolve_channel should NOT have auto-created it as active.
+        self.assertNotIn("planning", report["channels"]["created"])
+        # But the historical data for that channel is still present.
+        messages = self.target_store.get_recent(count=100, channel="planning")
+        self.assertEqual(len(messages), 2)
+        uids = {m["uid"] for m in messages}
+        self.assertEqual(uids, {"msg-root", "msg-reply"})
+        imported_jobs = self.target_jobs.list_all(channel="planning")
+        self.assertEqual(len(imported_jobs), 1)
+        self.assertEqual(imported_jobs[0]["uid"], "job-1")
+        planning_summary = self.target_summaries.get("planning")
+        self.assertIsNotNone(planning_summary)
+        self.assertEqual(planning_summary["uid"], "summary-planning")
+
     def test_build_export_coerces_legacy_string_archived_channels(self):
         """A caller passing a raw string list is coerced to the canonical dict form."""
         blob = archive.build_export(

@@ -248,6 +248,67 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
         "warnings": warnings,
     }
 
+    # --- Issue #13 v2 blocker fix: merge archived_channels FIRST ---
+    #
+    # This block used to run at the very end of _do_import, but that
+    # order meant resolve_channel() would auto-promote an archived name
+    # into channel_list while importing messages, and then the archive
+    # merge would skip it as "already_active". Net result: an archived
+    # channel with data was silently lifted back to active on every
+    # restore.
+    #
+    # The fix is to pre-seed archived_channels from the manifest before
+    # any data import runs, then teach resolve_channel() to route
+    # historical data into those names without adding them to the
+    # active channel_list.
+    restored_archived_names: set[str] = set()
+    manifest_archived = manifest.get("archived_channels") or []
+    if isinstance(archived_channels, list) and manifest_archived:
+        existing_archived_names = {
+            (ac.get("name") if isinstance(ac, dict) else ac)
+            for ac in archived_channels
+        }
+        active_names_snapshot = set(channel_list)
+        for raw in manifest_archived:
+            if isinstance(raw, dict):
+                name = str(raw.get("name", "")).strip().lower()
+                entry = {
+                    "name": name,
+                    "archived_at": raw.get("archived_at"),
+                    "archived_by": raw.get("archived_by", ""),
+                }
+            else:
+                name = str(raw).strip().lower()
+                entry = {
+                    "name": name,
+                    "archived_at": None,
+                    "archived_by": "",
+                }
+            if not name:
+                continue
+            if name in active_names_snapshot:
+                report["archived_channels"]["skipped"].append({
+                    "name": name,
+                    "reason": "already_active",
+                })
+                warnings.append(
+                    f"archived_channel '{name}' skipped (already active)"
+                )
+                continue
+            if name in existing_archived_names:
+                report["archived_channels"]["skipped"].append({
+                    "name": name,
+                    "reason": "already_archived",
+                })
+                warnings.append(
+                    f"archived_channel '{name}' skipped (already archived)"
+                )
+                continue
+            archived_channels.append(entry)
+            existing_archived_names.add(name)
+            restored_archived_names.add(name)
+            report["archived_channels"]["created"].append(name)
+
     # Collect existing UIDs for dedup
     existing_msg_uids = set()
     for m in store.get_recent(count=999_999_999):
@@ -268,6 +329,13 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
         if not ch:
             return "general"
         if ch in channel_list:
+            return ch
+        # Issue #13 v2 blocker fix: names that have just been restored
+        # into archived_channels must NOT be auto-created into the
+        # active channel_list. Historical data still flows into the
+        # channel (the name is returned), but the channel stays
+        # read-only/archived after the import.
+        if ch in restored_archived_names:
             return ch
         # Try to auto-create
         if len(channel_list) < max_channels:
@@ -502,61 +570,5 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
                 )
                 summary_report["created"] += 1
     report["sections"]["summaries"] = summary_report
-
-    # --- Issue #13 v2: merge archived_channels from manifest ---
-    #
-    # Rules:
-    #   * A name that already exists in the target's active channel_list
-    #     is skipped with a warning — we will not overwrite a live
-    #     channel with a restored archived one.
-    #   * A name that already exists in the target's archived list is
-    #     skipped with a warning — duplicate, keep the local entry.
-    #   * Everything else is appended to archived_channels (mutated in
-    #     place so the caller can write it back into room_settings).
-    manifest_archived = manifest.get("archived_channels") or []
-    if isinstance(archived_channels, list) and manifest_archived:
-        existing_archived_names = {
-            (ac.get("name") if isinstance(ac, dict) else ac)
-            for ac in archived_channels
-        }
-        active_names = set(channel_list)
-        for raw in manifest_archived:
-            if isinstance(raw, dict):
-                name = str(raw.get("name", "")).strip().lower()
-                entry = {
-                    "name": name,
-                    "archived_at": raw.get("archived_at"),
-                    "archived_by": raw.get("archived_by", ""),
-                }
-            else:
-                name = str(raw).strip().lower()
-                entry = {
-                    "name": name,
-                    "archived_at": None,
-                    "archived_by": "",
-                }
-            if not name:
-                continue
-            if name in active_names:
-                report["archived_channels"]["skipped"].append({
-                    "name": name,
-                    "reason": "already_active",
-                })
-                warnings.append(
-                    f"archived_channel '{name}' skipped (already active)"
-                )
-                continue
-            if name in existing_archived_names:
-                report["archived_channels"]["skipped"].append({
-                    "name": name,
-                    "reason": "already_archived",
-                })
-                warnings.append(
-                    f"archived_channel '{name}' skipped (already archived)"
-                )
-                continue
-            archived_channels.append(entry)
-            existing_archived_names.add(name)
-            report["archived_channels"]["created"].append(name)
 
     return report
