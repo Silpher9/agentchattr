@@ -6,6 +6,11 @@ import threading
 import uuid
 from pathlib import Path
 
+# Issue #13: constant for the pause-reason set when a channel is archived.
+# Used by JobStore.pause_channel_jobs and its callers; keeping this as a
+# module-level constant avoids typo-drift across the codebase.
+PAUSE_REASON_CHANNEL_ARCHIVED = "channel_archived"
+
 
 class JobStore:
     def __init__(self, path: str):
@@ -282,6 +287,74 @@ class JobStore:
                 return None
         self._fire("delete", result)
         return result
+
+    # --- Issue #13: channel-archive pause markers ---
+    #
+    # These use an orthogonal `paused` flag on the job dict rather than a new
+    # status value. That keeps existing open/done/archived semantics untouched
+    # and makes the rollback on unarchive trivial (the original status is
+    # preserved). A paused job should not trigger agent runs; callers check
+    # the flag before dispatching. No auto-resume on channel unarchive —
+    # explicit user intent (unpause_job) is required.
+
+    def pause_channel_jobs(self, channel: str, reason: str) -> list[dict]:
+        """Mark all non-paused jobs on *channel* as paused with *reason*.
+
+        Returns the list of affected job snapshots (copies). Jobs that are
+        already paused are left alone so their original pause reason/timestamp
+        is preserved.
+        """
+        if not channel:
+            return []
+        affected: list[dict] = []
+        now = time.time()
+        with self._lock:
+            for a in self._jobs:
+                if a.get("channel") != channel:
+                    continue
+                if a.get("paused"):
+                    continue
+                a["paused"] = True
+                a["pause_reason"] = reason
+                a["paused_at"] = now
+                a["updated_at"] = now
+                affected.append(dict(a))
+            if affected:
+                self._save()
+        for snap in affected:
+            self._fire("update", snap)
+        return affected
+
+    def unpause_job(self, job_id: int) -> dict | None:
+        """Clear the paused flag on a single job (explicit user resume).
+
+        Returns the updated job dict, or None if not found / not paused.
+        """
+        with self._lock:
+            for a in self._jobs:
+                if a["id"] != job_id:
+                    continue
+                if not a.get("paused"):
+                    return None
+                a.pop("paused", None)
+                a.pop("pause_reason", None)
+                a.pop("paused_at", None)
+                a["updated_at"] = time.time()
+                result = dict(a)
+                self._save()
+                break
+            else:
+                return None
+        self._fire("update", result)
+        return result
+
+    def is_paused(self, job_id: int) -> bool:
+        """Return True if the job exists and is currently paused."""
+        with self._lock:
+            for a in self._jobs:
+                if a["id"] == job_id:
+                    return bool(a.get("paused"))
+        return False
 
     def reorder(self, status: str, ordered_ids: list[int]) -> list[dict]:
         """Reorder jobs within a status group by explicit id order (top to bottom)."""
