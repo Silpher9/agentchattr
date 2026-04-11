@@ -243,31 +243,78 @@ class SessionStore:
         self._fire("update", result)
         return result
 
-    def pause(self, session_id: int) -> dict | None:
-        """Pause session (human interruption)."""
+    def pause(self, session_id: int, reason: str | None = None) -> dict | None:
+        """Pause session (human interruption, or channel-archive).
+
+        If *reason* is provided, it is stored on the session as
+        ``pause_reason`` so callers can distinguish why the session was
+        paused (e.g. Issue #13 uses ``"channel_archived"``).
+        """
         with self._lock:
             session = self._find(session_id)
             if not session or session["state"] not in ("active", "waiting"):
                 return None
             session["state"] = "paused"
             session["updated_at"] = time.time()
+            if reason:
+                session["pause_reason"] = reason
+                session["paused_at"] = time.time()
             self._save()
             result = dict(session)
         self._fire("update", result)
         return result
 
     def resume(self, session_id: int) -> dict | None:
-        """Resume a paused session."""
+        """Resume a paused session.
+
+        Clears any ``pause_reason``/``paused_at`` markers — the caller is
+        responsible for deciding whether the resume is allowed (e.g. for
+        Issue #13 a session paused with reason ``channel_archived`` must
+        not be resumed while its channel is still archived; that gate is
+        enforced by the calling layer, not here).
+        """
         with self._lock:
             session = self._find(session_id)
             if not session or session["state"] != "paused":
                 return None
             session["state"] = "active"
             session["updated_at"] = time.time()
+            session.pop("pause_reason", None)
+            session.pop("paused_at", None)
             self._save()
             result = dict(session)
         self._fire("update", result)
         return result
+
+    # --- Issue #13: bulk pause for channel-archive flow ---
+
+    def pause_channel_sessions(self, channel: str, reason: str) -> list[dict]:
+        """Pause all active/waiting sessions on *channel* with *reason*.
+
+        Already-paused sessions are left alone so their original pause
+        reason/timestamp stays intact. Returns snapshots of affected
+        sessions for callers that want to react (broadcast, logging, etc.).
+        """
+        if not channel:
+            return []
+        affected: list[dict] = []
+        now = time.time()
+        with self._lock:
+            for s in self._sessions:
+                if s.get("channel") != channel:
+                    continue
+                if s.get("state") not in ("active", "waiting"):
+                    continue
+                s["state"] = "paused"
+                s["pause_reason"] = reason
+                s["paused_at"] = now
+                s["updated_at"] = now
+                affected.append(dict(s))
+            if affected:
+                self._save()
+        for snap in affected:
+            self._fire("update", snap)
+        return affected
 
     def complete(self, session_id: int, output_message_id: int | None = None) -> dict | None:
         """Mark session as complete."""
