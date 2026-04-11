@@ -1286,10 +1286,26 @@ body.archive-no-select * {
 
 /* --- Mobile responsive --- */
 @media (max-width: 768px) {
+    /* Issue #14: close cascade leak with style.css mobile overlay rules.
+       jobs.css loads after style.css, so the base `#jobs-panel { position:
+       relative }` + `#jobs-panel.hidden { margin-right: -360px }` were
+       beating the mobile overlay rules from style.css:4886-4904, leaving
+       #jobs-panel in-flow on <=768px viewports and locking #timeline to
+       ~360px. Repeat the overlay intent here so source order resolves
+       cleanly — no !important needed, because these rules live in the
+       same file after the base and therefore win the cascade. */
     #jobs-panel {
+        position: absolute;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        z-index: 20;
         width: 100% !important;
         max-width: 100vw !important;
         min-width: 0 !important;
+    }
+    #jobs-panel.hidden {
+        margin-right: -100vw;
     }
 
     .jobs-conv-input {
