@@ -1415,6 +1415,21 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
                 if name in room_settings["channels"]:
                     continue
+                # Issue #13 blocker fix: reject names that already live in
+                # archived_channels. Allowing the collision would produce
+                # a state where active+archived hold the same name, which
+                # would make channel_delete's archived-first branch wipe
+                # history/rules/cursors on a still-visible active channel.
+                if _is_channel_archived(name):
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "channel_create_error",
+                            "name": name,
+                            "error": "name_in_archived",
+                        }))
+                    except Exception:
+                        pass
+                    continue
                 if len(room_settings["channels"]) >= MAX_CHANNELS:
                     continue
                 room_settings["channels"].append(name)
@@ -1432,6 +1447,19 @@ async def websocket_endpoint(websocket: WebSocket):
                 if old_name not in room_settings["channels"]:
                     continue
                 if new_name in room_settings["channels"]:
+                    continue
+                # Issue #13 blocker fix: reject rename into an archived
+                # channel name for the same reason as channel_create.
+                if _is_channel_archived(new_name):
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "channel_rename_error",
+                            "old_name": old_name,
+                            "new_name": new_name,
+                            "error": "name_in_archived",
+                        }))
+                    except Exception:
+                        pass
                     continue
                 idx = room_settings["channels"].index(old_name)
                 room_settings["channels"][idx] = new_name
@@ -1458,16 +1486,32 @@ async def websocket_endpoint(websocket: WebSocket):
                 name = (event.get("name") or "").strip().lower()
                 if name == "general":
                     continue
+                # Issue #13 blocker fix: defensive guard for the
+                # "impossible state" where the same name sits in both
+                # channels and archived_channels. channel_create and
+                # channel_rename now reject that collision, but if an
+                # older settings.json loads with the bad state we must
+                # refuse delete rather than let the archived-first
+                # branch wipe data on a still-visible active channel.
+                archived_has = _is_channel_archived(name)
+                active_has = name in room_settings.get("channels", [])
+                if archived_has and active_has:
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "channel_delete_error",
+                            "name": name,
+                            "error": "active_and_archived_collision",
+                        }))
+                    except Exception:
+                        pass
+                    continue
                 # Issue #13: `channel_delete` is now the hard-destructive
                 # path. It stays reachable for active channels during the
                 # backend build (steps 1-5); the frontend in step 6 will
                 # only wire it up from the archived-list and the
                 # tightened guard (reject active, require archived) will
                 # land in that same commit together with the UI change.
-                if name in [
-                    ac.get("name") if isinstance(ac, dict) else ac
-                    for ac in room_settings.get("archived_channels", [])
-                ]:
+                if archived_has:
                     room_settings["archived_channels"] = [
                         ac for ac in room_settings.get("archived_channels", [])
                         if (ac.get("name") if isinstance(ac, dict) else ac) != name
