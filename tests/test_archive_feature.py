@@ -664,5 +664,296 @@ class ImportExportApiTests(unittest.TestCase):
         self.assertIn("expected .zip", payload["error"])
 
 
+# ---------------------------------------------------------------------------
+# Issue #13: channel-archive feature — unit tests for the stores and
+# the _is_channel_archived helper. These are intentionally small and
+# direct so they survive refactors of the surrounding code paths.
+# ---------------------------------------------------------------------------
+
+
+class ChannelArchiveJobsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jobs = JobStore(str(Path(self.tmp.name) / "jobs.json"))
+
+    def test_pause_channel_jobs_only_affects_matching_channel(self):
+        from jobs import PAUSE_REASON_CHANNEL_ARCHIVED
+        a = self.jobs.create(
+            title="a", job_type="job", channel="voedselbos",
+            created_by="ingmar", status="open",
+        )
+        b = self.jobs.create(
+            title="b", job_type="job", channel="voedselbos",
+            created_by="ingmar", status="done",
+        )
+        c = self.jobs.create(
+            title="c", job_type="job", channel="schuurproject",
+            created_by="ingmar", status="open",
+        )
+
+        affected = self.jobs.pause_channel_jobs(
+            "voedselbos", PAUSE_REASON_CHANNEL_ARCHIVED,
+        )
+
+        self.assertEqual(len(affected), 2)
+        # Both voedselbos jobs paused with the reason + timestamp.
+        for job_id in (a["id"], b["id"]):
+            fetched = self.jobs.get(job_id)
+            self.assertTrue(fetched.get("paused"))
+            self.assertEqual(
+                fetched.get("pause_reason"), PAUSE_REASON_CHANNEL_ARCHIVED,
+            )
+            self.assertIsNotNone(fetched.get("paused_at"))
+        # Other channel untouched.
+        other = self.jobs.get(c["id"])
+        self.assertFalse(other.get("paused"))
+        self.assertIsNone(other.get("pause_reason"))
+
+    def test_pause_channel_jobs_is_idempotent(self):
+        """Already-paused jobs keep their original pause reason/timestamp."""
+        from jobs import PAUSE_REASON_CHANNEL_ARCHIVED
+        j = self.jobs.create(
+            title="test", job_type="job", channel="voedselbos",
+            created_by="ingmar", status="open",
+        )
+        first = self.jobs.pause_channel_jobs(
+            "voedselbos", PAUSE_REASON_CHANNEL_ARCHIVED,
+        )
+        self.assertEqual(len(first), 1)
+        original_paused_at = self.jobs.get(j["id"])["paused_at"]
+
+        # Second call with a different reason must NOT overwrite the
+        # existing pause markers.
+        second = self.jobs.pause_channel_jobs(
+            "voedselbos", "some_other_reason",
+        )
+        self.assertEqual(len(second), 0)
+        after = self.jobs.get(j["id"])
+        self.assertEqual(after["pause_reason"], PAUSE_REASON_CHANNEL_ARCHIVED)
+        self.assertEqual(after["paused_at"], original_paused_at)
+
+    def test_unpause_job_clears_all_markers(self):
+        from jobs import PAUSE_REASON_CHANNEL_ARCHIVED
+        j = self.jobs.create(
+            title="test", job_type="job", channel="voedselbos",
+            created_by="ingmar", status="open",
+        )
+        self.jobs.pause_channel_jobs(
+            "voedselbos", PAUSE_REASON_CHANNEL_ARCHIVED,
+        )
+        self.assertTrue(self.jobs.is_paused(j["id"]))
+
+        resumed = self.jobs.unpause_job(j["id"])
+        self.assertIsNotNone(resumed)
+        self.assertNotIn("paused", resumed)
+        self.assertNotIn("pause_reason", resumed)
+        self.assertNotIn("paused_at", resumed)
+        # Original status preserved.
+        self.assertEqual(resumed["status"], "open")
+        self.assertFalse(self.jobs.is_paused(j["id"]))
+
+    def test_unpause_job_returns_none_when_not_paused(self):
+        j = self.jobs.create(
+            title="test", job_type="job", channel="voedselbos",
+            created_by="ingmar", status="open",
+        )
+        self.assertIsNone(self.jobs.unpause_job(j["id"]))
+
+    def test_pause_channel_jobs_no_match_returns_empty(self):
+        self.jobs.create(
+            title="a", job_type="job", channel="schuurproject",
+            created_by="ingmar", status="open",
+        )
+        affected = self.jobs.pause_channel_jobs("ghost", "channel_archived")
+        self.assertEqual(affected, [])
+
+
+class ChannelArchiveSessionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        from session_store import SessionStore
+        self.sessions = SessionStore(
+            str(Path(self.tmp.name) / "sessions.json"),
+        )
+
+    def _seed(self, session_id, channel, state):
+        self.sessions._sessions.append({
+            "id": session_id,
+            "channel": channel,
+            "state": state,
+            "template_id": "t",
+            "template_name": "t",
+            "cast": {},
+            "current_phase": 0,
+            "current_turn": 0,
+            "started_by": "ingmar",
+            "started_at": 0,
+            "updated_at": 0,
+        })
+        self.sessions._next_id = max(self.sessions._next_id, session_id + 1)
+
+    def test_pause_channel_sessions_scopes_to_channel_and_state(self):
+        self._seed(1, "voedselbos", "active")
+        self._seed(2, "voedselbos", "waiting")
+        self._seed(3, "voedselbos", "complete")     # terminal — untouched
+        self._seed(4, "schuurproject", "active")    # other channel — untouched
+
+        affected = self.sessions.pause_channel_sessions(
+            "voedselbos", "channel_archived",
+        )
+
+        self.assertEqual(len(affected), 2)
+        self.assertEqual(self.sessions._sessions[0]["state"], "paused")
+        self.assertEqual(
+            self.sessions._sessions[0]["pause_reason"], "channel_archived",
+        )
+        self.assertEqual(self.sessions._sessions[1]["state"], "paused")
+        self.assertEqual(self.sessions._sessions[2]["state"], "complete")
+        self.assertEqual(self.sessions._sessions[3]["state"], "active")
+
+    def test_pause_channel_sessions_is_idempotent_on_already_paused(self):
+        self._seed(1, "voedselbos", "active")
+        self.sessions.pause_channel_sessions(
+            "voedselbos", "channel_archived",
+        )
+        original_paused_at = self.sessions._sessions[0]["paused_at"]
+        second = self.sessions.pause_channel_sessions(
+            "voedselbos", "some_other_reason",
+        )
+        self.assertEqual(second, [])
+        self.assertEqual(
+            self.sessions._sessions[0]["pause_reason"], "channel_archived",
+        )
+        self.assertEqual(
+            self.sessions._sessions[0]["paused_at"], original_paused_at,
+        )
+
+    def test_resume_clears_pause_reason_and_paused_at(self):
+        self._seed(1, "voedselbos", "active")
+        self.sessions.pause_channel_sessions(
+            "voedselbos", "channel_archived",
+        )
+        resumed = self.sessions.resume(1)
+        self.assertIsNotNone(resumed)
+        self.assertEqual(resumed["state"], "active")
+        self.assertNotIn("pause_reason", resumed)
+        self.assertNotIn("paused_at", resumed)
+
+
+class ChannelArchivedHelperTests(unittest.TestCase):
+    """_is_channel_archived(name) must consult room_settings.archived_channels
+    under both the canonical dict form and the legacy string form."""
+
+    def setUp(self):
+        self._saved_settings = dict(getattr(app, "room_settings", {}))
+        self.addCleanup(
+            lambda: setattr(app, "room_settings", self._saved_settings),
+        )
+
+    def test_matches_canonical_dict_entry(self):
+        app.room_settings = {
+            "channels": ["general"],
+            "archived_channels": [
+                {"name": "voedselbos", "archived_at": 0, "archived_by": "ingmar"},
+            ],
+        }
+        self.assertTrue(app._is_channel_archived("voedselbos"))
+        self.assertFalse(app._is_channel_archived("general"))
+        self.assertFalse(app._is_channel_archived("unknown"))
+
+    def test_matches_legacy_string_entry(self):
+        # Older settings.json variants stored archived_channels as a
+        # flat string list. The helper must still return True for those
+        # entries so the write-block guards cannot be bypassed by a
+        # stale file layout.
+        app.room_settings = {
+            "channels": ["general"],
+            "archived_channels": ["legacy-foo"],
+        }
+        self.assertTrue(app._is_channel_archived("legacy-foo"))
+
+    def test_handles_missing_or_malformed(self):
+        app.room_settings = {"channels": ["general"]}
+        self.assertFalse(app._is_channel_archived("anything"))
+        app.room_settings["archived_channels"] = None
+        self.assertFalse(app._is_channel_archived("anything"))
+        self.assertFalse(app._is_channel_archived(""))
+        self.assertFalse(app._is_channel_archived(None))
+
+
+class ChannelArchiveExportApiTests(unittest.TestCase):
+    """End-to-end test: archived channels survive an export + import
+    cycle through the real /api/export + /api/import endpoints."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.store, self.jobs, self.rules, self.summaries = make_stores(
+            self.root / "appdata",
+        )
+
+        self._saved = {
+            "store": getattr(app, "store", None),
+            "jobs": getattr(app, "jobs", None),
+            "rules": getattr(app, "rules", None),
+            "summaries": getattr(app, "summaries", None),
+            "config": getattr(app, "config", None),
+            "room_settings": dict(getattr(app, "room_settings", {})),
+        }
+
+        app.store = self.store
+        app.jobs = self.jobs
+        app.rules = self.rules
+        app.summaries = self.summaries
+        app.config = {
+            "server": {"data_dir": str(self.root / "appdata"), "version": "test"},
+        }
+        app.room_settings = {
+            "title": "agentchattr",
+            "username": "user",
+            "font": "sans",
+            "channels": ["general", "planning"],
+            "archived_channels": [
+                {"name": "voedselbos", "archived_at": 1712836800.0, "archived_by": "Ingmar"},
+            ],
+            "history_limit": "all",
+            "contrast": "normal",
+            "custom_roles": [],
+        }
+
+        def restore():
+            app.store = self._saved["store"]
+            app.jobs = self._saved["jobs"]
+            app.rules = self._saved["rules"]
+            app.summaries = self._saved["summaries"]
+            app.config = self._saved["config"]
+            app.room_settings = self._saved["room_settings"]
+
+        self.addCleanup(restore)
+
+    def test_export_endpoint_includes_archived_channels_in_manifest(self):
+        # Seed a bit of history in the active channel so the export is
+        # non-trivial.
+        self.store.add("Ingmar", "hello planning", channel="planning")
+        response = asyncio.run(app.export_history())
+        self.assertEqual(response.status_code, 200)
+
+        with zipfile.ZipFile(io.BytesIO(response.body)) as zf:
+            manifest = json.loads(zf.read("manifest.json"))
+
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(len(manifest["archived_channels"]), 1)
+        self.assertEqual(
+            manifest["archived_channels"][0]["name"], "voedselbos",
+        )
+        self.assertEqual(
+            manifest["archived_channels"][0]["archived_by"], "Ingmar",
+        )
+        self.assertEqual(manifest["counts"]["archived_channels"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
