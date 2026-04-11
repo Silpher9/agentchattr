@@ -158,6 +158,22 @@ def _save_settings():
     p.write_text(json.dumps(room_settings, indent=2), "utf-8")
 
 
+def _is_channel_archived(name: str) -> bool:
+    """Return True if *name* is currently in room_settings.archived_channels.
+
+    Issue #13: used by write-block guards across the HTTP/WS/MCP stack to
+    reject new activity on archived channels (messages, jobs, sessions,
+    rule proposals, etc.). Reads are never gated through this helper.
+    """
+    if not name:
+        return False
+    for ac in room_settings.get("archived_channels", []) or []:
+        entry_name = ac.get("name") if isinstance(ac, dict) else ac
+        if entry_name == name:
+            return True
+    return False
+
+
 def _extract_agent_token(request: Request) -> str:
     auth = request.headers.get("authorization", "")
     if auth and auth.lower().startswith("bearer "):
@@ -1111,6 +1127,21 @@ async def websocket_endpoint(websocket: WebSocket):
                 if not text and not attachments:
                     continue
 
+                # Issue #13: archived channels are read-only. Reject new
+                # messages with a client-scoped error so the UI can surface
+                # the cause; fall through to `continue` so nothing hits the
+                # store, router, or agent-trigger path.
+                if _is_channel_archived(channel):
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "channel_archived_write_error",
+                            "channel": channel,
+                            "error": "channel_archived",
+                        }))
+                    except Exception:
+                        pass
+                    continue
+
                 # Command handling
                 if text.startswith("/"):
                     cmd_parts = text.split()
@@ -1186,6 +1217,20 @@ async def websocket_endpoint(websocket: WebSocket):
                 author = event.get("author") or event.get("owner") or room_settings.get("username", "user")
                 reason = event.get("reason", "")
                 channel = event.get("channel", "general")
+                # Issue #13: block new rule proposals against archived
+                # channels. A rule scoped to a dormant channel has no
+                # effect anyway; reject explicitly so the caller knows.
+                if channel and _is_channel_archived(channel):
+                    try:
+                        await websocket.send_text(json.dumps({
+                            "type": "channel_archived_write_error",
+                            "channel": channel,
+                            "error": "channel_archived",
+                            "subject": "rule_propose",
+                        }))
+                    except Exception:
+                        pass
+                    continue
                 is_human = author.lower() == room_settings.get("username", "user").lower()
                 if text:
                     rule = rules.propose(text, author, reason,
@@ -1661,6 +1706,13 @@ async def api_send(request: Request):
         return JSONResponse({"error": "text is required"}, status_code=400)
     channel = body.get("channel", "general")
 
+    # Issue #13: archived channels are read-only.
+    if _is_channel_archived(channel):
+        return JSONResponse(
+            {"error": f"channel '{channel}' is archived"},
+            status_code=409,
+        )
+
     msg = store.add(sender, text, channel=channel)
     return JSONResponse(msg)
 
@@ -1981,6 +2033,12 @@ async def create_job(request: Request):
         return JSONResponse({"error": "title required"}, status_code=400)
     job_type = body.get("type", "job")
     channel = body.get("channel", "general")
+    # Issue #13: no new jobs on archived channels.
+    if _is_channel_archived(channel):
+        return JSONResponse(
+            {"error": f"channel '{channel}' is archived"},
+            status_code=409,
+        )
     created_by = body.get("created_by", "user")
     anchor_msg_id = body.get("anchor_msg_id")
     assignee = body.get("assignee", "")
@@ -2477,6 +2535,13 @@ async def start_session(request: Request):
     cast = body.get("cast", {})
     goal = body.get("goal", "")
     started_by = body.get("started_by", "user")
+
+    # Issue #13: no new sessions on archived channels.
+    if _is_channel_archived(channel):
+        return JSONResponse(
+            {"error": f"channel '{channel}' is archived"},
+            status_code=409,
+        )
 
     # If running from a draft, load the inline template from message metadata
     tmpl = None

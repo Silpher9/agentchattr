@@ -214,6 +214,12 @@ def chat_send(
     # Infer channel from last-read cursor when omitted
     if not channel.strip():
         channel = _last_active_channel(sender) or "general"
+    # Issue #13: archived channels are read-only. chat_read still works,
+    # but chat_send is rejected so agents see a clear error instead of
+    # their message silently landing in a dormant channel.
+    import app as _app_mod
+    if _app_mod._is_channel_archived(channel):
+        return f"Error: channel '{channel}' is archived (read-only)."
     # Block pending instances (identity not yet confirmed)
     if registry and registry.is_pending(sender):
         return "Error: identity not confirmed. Call chat_claim(sender=your_base_name) to get your identity."
@@ -352,6 +358,10 @@ def chat_propose_job(
         return err
     if not channel.strip():
         channel = _last_active_channel(sender) or "general"
+    # Issue #13: job proposals on archived channels are rejected.
+    import app as _app_mod
+    if _app_mod._is_channel_archived(channel):
+        return f"Error: channel '{channel}' is archived (read-only)."
     if not title.strip():
         return "Error: title is required."
     title = title.strip()[:80]
@@ -899,6 +909,12 @@ def chat_summary(
         return json.dumps(entry, ensure_ascii=False)
 
     if action == "write":
+        # Issue #13: writing a new summary on an archived channel is a
+        # write — read stays allowed so agents can still catch up on
+        # the dormant channel's history.
+        import app as _app_mod
+        if _app_mod._is_channel_archived(channel):
+            return f"Error: channel '{channel}' is archived (read-only)."
         if not text.strip():
             return "Error: text is required."
         if len(text.strip()) > 1000:
