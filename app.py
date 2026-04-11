@@ -1670,6 +1670,8 @@ async def export_history():
         zip_bytes = _archive.build_export(
             store, jobs, rules, summaries,
             app_version=config.get("server", {}).get("version", ""),
+            # Issue #13 v2: preserve archive-state across export/import.
+            archived_channels=list(room_settings.get("archived_channels", [])),
         )
     except Exception as exc:
         return JSONResponse({"error": f"export failed: {exc}"}, status_code=500)
@@ -1695,17 +1697,26 @@ async def import_history(file: UploadFile = File(...)):
         )
     channel_list = list(room_settings.get("channels", ["general"]))
     max_ch = room_settings.get("max_channels", 8)
+    # Issue #13 v2: mutable mirror of archived_channels; archive._do_import
+    # may append new entries from the manifest. We write back at the end.
+    archived_list = list(room_settings.get("archived_channels", []))
     report = _archive.import_archive(
         content, store, jobs, rules, summaries,
         channel_list, max_channels=max_ch,
+        archived_channels=archived_list,
     )
     if not report.get("ok"):
         error = report.get("error", "import failed")
         status = 409 if "already running" in error else 400
         return JSONResponse({"error": error}, status_code=status)
-    # Update channel list if new channels were created
-    if report["channels"]["created"]:
+    # Update settings if channel-list or archived-list changed
+    channels_changed = bool(report.get("channels", {}).get("created"))
+    archived_changed = bool(report.get("archived_channels", {}).get("created"))
+    if channels_changed:
         room_settings["channels"] = channel_list
+    if archived_changed:
+        room_settings["archived_channels"] = archived_list
+    if channels_changed or archived_changed:
         _save_settings()
         await broadcast_settings()
     # Tell all connected clients to reload (picks up imported messages)

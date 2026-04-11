@@ -129,7 +129,15 @@ class ArchiveRoundTripTests(unittest.TestCase):
         self.assertEqual(manifest["schema_version"], archive.SCHEMA_VERSION)
         self.assertEqual(
             manifest["counts"],
-            {"messages": 2, "jobs": 1, "rules": 2, "summaries": 2},
+            {
+                "messages": 2,
+                "jobs": 1,
+                "rules": 2,
+                "summaries": 2,
+                # Issue #13 v2: archived_channels is always counted,
+                # even when empty, so the manifest shape is stable.
+                "archived_channels": 0,
+            },
         )
 
         channel_list = ["general"]
@@ -218,6 +226,211 @@ class ArchiveRoundTripTests(unittest.TestCase):
 
         self.assertFalse(report["ok"])
         self.assertIn("unsupported archive schema_version", report["error"])
+
+    # --- Issue #13 v2: archived_channels roundtrip + compat tests ---
+
+    def test_archived_channels_roundtrip(self):
+        """Exporting with archived_channels and re-importing preserves them."""
+        source_archived = [
+            {"name": "voedselbos", "archived_at": 1712836800.0, "archived_by": "Ingmar"},
+            {"name": "domotica", "archived_at": 1712836801.0, "archived_by": "claude"},
+        ]
+        blob = archive.build_export(
+            self.source_store,
+            self.source_jobs,
+            self.source_rules,
+            self.source_summaries,
+            app_version="test",
+            archived_channels=source_archived,
+        )
+
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            manifest = json.loads(zf.read("manifest.json"))
+
+        self.assertEqual(manifest["schema_version"], 2)
+        self.assertEqual(manifest["counts"]["archived_channels"], 2)
+        self.assertEqual(len(manifest["archived_channels"]), 2)
+        self.assertEqual(manifest["archived_channels"][0]["name"], "voedselbos")
+        self.assertEqual(manifest["archived_channels"][0]["archived_by"], "Ingmar")
+
+        channel_list = ["general"]
+        target_archived: list = []
+        report = archive.import_archive(
+            blob,
+            self.target_store,
+            self.target_jobs,
+            self.target_rules,
+            self.target_summaries,
+            channel_list,
+            max_channels=8,
+            archived_channels=target_archived,
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(
+            sorted(report["archived_channels"]["created"]),
+            ["domotica", "voedselbos"],
+        )
+        self.assertEqual(len(target_archived), 2)
+        names = {ac["name"] for ac in target_archived}
+        self.assertEqual(names, {"voedselbos", "domotica"})
+        voedselbos = next(ac for ac in target_archived if ac["name"] == "voedselbos")
+        self.assertEqual(voedselbos["archived_by"], "Ingmar")
+        self.assertEqual(voedselbos["archived_at"], 1712836800.0)
+
+    def test_import_skips_archived_channel_collision_with_active(self):
+        """An archived-channel name that collides with an active channel is skipped."""
+        source_archived = [{"name": "planning", "archived_at": 1.0, "archived_by": "Ingmar"}]
+        blob = archive.build_export(
+            self.source_store,
+            self.source_jobs,
+            self.source_rules,
+            self.source_summaries,
+            app_version="test",
+            archived_channels=source_archived,
+        )
+
+        # Target already has "planning" as an ACTIVE channel — the
+        # import must refuse to archive-restore it.
+        channel_list = ["general", "planning"]
+        target_archived: list = []
+        report = archive.import_archive(
+            blob,
+            self.target_store,
+            self.target_jobs,
+            self.target_rules,
+            self.target_summaries,
+            channel_list,
+            max_channels=8,
+            archived_channels=target_archived,
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["archived_channels"]["created"], [])
+        skipped = report["archived_channels"]["skipped"]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["name"], "planning")
+        self.assertEqual(skipped[0]["reason"], "already_active")
+        self.assertEqual(target_archived, [])
+        self.assertIn("planning", channel_list)
+        self.assertTrue(
+            any("planning" in w and "already active" in w for w in report["warnings"]),
+            f"expected 'already active' warning, got: {report['warnings']}",
+        )
+
+    def test_import_skips_archived_channel_collision_with_archived(self):
+        """An archived-channel name already in the target's archived list is skipped."""
+        source_archived = [{"name": "voedselbos", "archived_at": 100.0, "archived_by": "Ingmar"}]
+        blob = archive.build_export(
+            self.source_store,
+            self.source_jobs,
+            self.source_rules,
+            self.source_summaries,
+            app_version="test",
+            archived_channels=source_archived,
+        )
+
+        # Target already has "voedselbos" archived with a DIFFERENT
+        # timestamp — the import must not overwrite it.
+        channel_list = ["general"]
+        target_archived = [
+            {"name": "voedselbos", "archived_at": 999.0, "archived_by": "claude"},
+        ]
+        report = archive.import_archive(
+            blob,
+            self.target_store,
+            self.target_jobs,
+            self.target_rules,
+            self.target_summaries,
+            channel_list,
+            max_channels=8,
+            archived_channels=target_archived,
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["archived_channels"]["created"], [])
+        skipped = report["archived_channels"]["skipped"]
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(skipped[0]["reason"], "already_archived")
+        # Local entry must remain unchanged.
+        self.assertEqual(len(target_archived), 1)
+        self.assertEqual(target_archived[0]["archived_at"], 999.0)
+        self.assertEqual(target_archived[0]["archived_by"], "claude")
+        self.assertTrue(
+            any("voedselbos" in w and "already archived" in w for w in report["warnings"]),
+            f"expected 'already archived' warning, got: {report['warnings']}",
+        )
+
+    def test_import_v1_zip_without_archived_channels_key(self):
+        """A legacy v1 manifest (no archived_channels key) imports cleanly."""
+        # Hand-build a v1 manifest that mirrors what an older agentchattr
+        # version would have written: no archived_channels key, counts
+        # without the archived_channels entry.
+        buf = io.BytesIO()
+        v1_manifest = {
+            "schema_version": 1,
+            "archive_id": "legacy-archive",
+            "created_at": "2025-12-01T00:00:00Z",
+            "product": "agentchattr",
+            "app_version": "0.2.0",
+            "counts": {
+                "messages": 0,
+                "jobs": 0,
+                "rules": 0,
+                "summaries": 0,
+            },
+            "attachments_included": False,
+        }
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", json.dumps(v1_manifest))
+            zf.writestr("messages.jsonl", "")
+            zf.writestr("jobs.json", "[]")
+            zf.writestr("rules.json", "[]")
+            zf.writestr("summaries.json", "[]")
+
+        channel_list = ["general"]
+        target_archived: list = []
+        report = archive.import_archive(
+            buf.getvalue(),
+            self.target_store,
+            self.target_jobs,
+            self.target_rules,
+            self.target_summaries,
+            channel_list,
+            max_channels=8,
+            archived_channels=target_archived,
+        )
+
+        self.assertTrue(report["ok"], f"v1 import failed: {report}")
+        # archived_channels section still exists in the report shape
+        # but is empty because the manifest had no entries.
+        self.assertEqual(report["archived_channels"]["created"], [])
+        self.assertEqual(report["archived_channels"]["skipped"], [])
+        self.assertEqual(target_archived, [])
+
+    def test_build_export_coerces_legacy_string_archived_channels(self):
+        """A caller passing a raw string list is coerced to the canonical dict form."""
+        blob = archive.build_export(
+            self.source_store,
+            self.source_jobs,
+            self.source_rules,
+            self.source_summaries,
+            app_version="test",
+            # Simulate a pre-v2 settings.json layout where archived was
+            # stored as a flat list of strings.
+            archived_channels=["legacy-foo", "legacy-bar"],
+        )
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            manifest = json.loads(zf.read("manifest.json"))
+        self.assertEqual(len(manifest["archived_channels"]), 2)
+        names = {ac["name"] for ac in manifest["archived_channels"]}
+        self.assertEqual(names, {"legacy-foo", "legacy-bar"})
+        # All entries are dicts with the canonical keys even though the
+        # input was strings.
+        for ac in manifest["archived_channels"]:
+            self.assertIn("name", ac)
+            self.assertIn("archived_at", ac)
+            self.assertIn("archived_by", ac)
 
 
 class ImportExportApiTests(unittest.TestCase):

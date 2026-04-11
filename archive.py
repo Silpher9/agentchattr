@@ -1,4 +1,16 @@
-"""Export/import archive for project history (chat, jobs, rules, summaries)."""
+"""Export/import archive for project history (chat, jobs, rules, summaries).
+
+Schema versions
+---------------
+* v1 — messages/jobs/rules/summaries only.
+* v2 — adds manifest["archived_channels"] for Issue #13. A v2 manifest
+  lists the channels that were in read-only archived state at export
+  time so restores preserve archive-state (and don't silently lift an
+  archived channel back to active). v1 imports on v2 code still work
+  because the field defaults to an empty list. v2 exports cannot be
+  imported on v1 code — the existing schema_version guard rejects that
+  correctly, which is the documented MVP behavior in issue #13.
+"""
 
 import hashlib
 import io
@@ -9,7 +21,7 @@ import time
 import uuid
 import zipfile
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_IMPORT_SIZE = 50 * 1024 * 1024  # 50MB uncompressed
 
 _import_lock = threading.Lock()
@@ -40,8 +52,16 @@ def _ensure_uid(record: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def build_export(store, jobs_store, rules_store, summary_store,
-                 app_version: str = "") -> bytes:
-    """Build a zip archive from current stores. Returns zip bytes."""
+                 app_version: str = "",
+                 archived_channels: list | None = None) -> bytes:
+    """Build a zip archive from current stores. Returns zip bytes.
+
+    Issue #13 (schema v2): pass the current
+    ``room_settings["archived_channels"]`` list via *archived_channels*
+    so the manifest records which channels were read-only at export
+    time. A missing/empty list is fine and produces an empty archive-
+    state section (older clients that don't track it keep working).
+    """
     buf = io.BytesIO()
 
     # Collect data
@@ -49,6 +69,26 @@ def build_export(store, jobs_store, rules_store, summary_store,
     jobs_list = jobs_store.list_all() if jobs_store else []
     rules_list = rules_store.list_all() if rules_store else []
     summaries = summary_store.get_all() if summary_store else {}
+    # Issue #13 v2: normalize archived_channels entries. Expected shape
+    # is a list of {name, archived_at, archived_by} dicts; a raw string
+    # list from a legacy settings.json is coerced into the canonical
+    # form so restores keep working.
+    archived_channels_out: list[dict] = []
+    for ac in archived_channels or []:
+        if isinstance(ac, dict):
+            entry = {
+                "name": str(ac.get("name", "")).strip().lower(),
+                "archived_at": ac.get("archived_at"),
+                "archived_by": ac.get("archived_by", ""),
+            }
+        else:
+            entry = {
+                "name": str(ac).strip().lower(),
+                "archived_at": None,
+                "archived_by": "",
+            }
+        if entry["name"]:
+            archived_channels_out.append(entry)
 
     # Build messages JSONL
     messages_lines = []
@@ -114,8 +154,12 @@ def build_export(store, jobs_store, rules_store, summary_store,
             "jobs": len(exported_jobs),
             "rules": len(exported_rules),
             "summaries": len(exported_summaries),
+            "archived_channels": len(archived_channels_out),
         },
         "attachments_included": False,
+        # Issue #13 v2: archived-channel state travels with the zip so
+        # a restore rebuilds the read-only set.
+        "archived_channels": archived_channels_out,
     }
 
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -134,10 +178,18 @@ def build_export(store, jobs_store, rules_store, summary_store,
 
 def import_archive(zip_bytes: bytes, store, jobs_store, rules_store,
                    summary_store, channel_list: list[str],
-                   max_channels: int = 8) -> dict:
+                   max_channels: int = 8,
+                   archived_channels: list | None = None) -> dict:
     """Import a zip archive, merging into current stores.
 
     Returns a report dict with counts and warnings.
+
+    Issue #13 (schema v2): *archived_channels* is a mutable list
+    mirroring ``room_settings["archived_channels"]``. When the manifest
+    contains archive-state entries they are merged into this list,
+    skipping any name that is already active or already archived. The
+    caller writes the mutated list back into room_settings on return,
+    matching the pattern used for *channel_list*.
     """
     # Issue #5: import lock prevents concurrent imports
     if not _import_lock.acquire(blocking=False):
@@ -145,13 +197,15 @@ def import_archive(zip_bytes: bytes, store, jobs_store, rules_store,
 
     try:
         return _do_import(zip_bytes, store, jobs_store, rules_store,
-                          summary_store, channel_list, max_channels)
+                          summary_store, channel_list, max_channels,
+                          archived_channels)
     finally:
         _import_lock.release()
 
 
 def _do_import(zip_bytes, store, jobs_store, rules_store,
-               summary_store, channel_list, max_channels):
+               summary_store, channel_list, max_channels,
+               archived_channels=None):
     warnings = []
 
     # Validate zip
@@ -189,6 +243,8 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
         "archive": archive_info,
         "sections": {},
         "channels": {"created": [], "remapped": [], "skipped": []},
+        # Issue #13 v2: archive-state merge report
+        "archived_channels": {"created": [], "skipped": []},
         "warnings": warnings,
     }
 
@@ -352,7 +408,12 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
                         old_jid = m["metadata"].get("job_id")
                         if old_jid in _job_id_remap:
                             m["metadata"]["job_id"] = _job_id_remap[old_jid]
-                store._save()
+                # Pre-existing bug fix (surfaced by #13 work): the
+                # MessageStore has no _save() method — its persistence
+                # is _rewrite_jsonl(). The previous call crashed the
+                # round-trip import test on clean main before any
+                # #13 changes landed.
+                store._rewrite_jsonl()
     report["sections"]["jobs"] = job_report
 
     # --- Import rules ---
@@ -441,5 +502,61 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
                 )
                 summary_report["created"] += 1
     report["sections"]["summaries"] = summary_report
+
+    # --- Issue #13 v2: merge archived_channels from manifest ---
+    #
+    # Rules:
+    #   * A name that already exists in the target's active channel_list
+    #     is skipped with a warning — we will not overwrite a live
+    #     channel with a restored archived one.
+    #   * A name that already exists in the target's archived list is
+    #     skipped with a warning — duplicate, keep the local entry.
+    #   * Everything else is appended to archived_channels (mutated in
+    #     place so the caller can write it back into room_settings).
+    manifest_archived = manifest.get("archived_channels") or []
+    if isinstance(archived_channels, list) and manifest_archived:
+        existing_archived_names = {
+            (ac.get("name") if isinstance(ac, dict) else ac)
+            for ac in archived_channels
+        }
+        active_names = set(channel_list)
+        for raw in manifest_archived:
+            if isinstance(raw, dict):
+                name = str(raw.get("name", "")).strip().lower()
+                entry = {
+                    "name": name,
+                    "archived_at": raw.get("archived_at"),
+                    "archived_by": raw.get("archived_by", ""),
+                }
+            else:
+                name = str(raw).strip().lower()
+                entry = {
+                    "name": name,
+                    "archived_at": None,
+                    "archived_by": "",
+                }
+            if not name:
+                continue
+            if name in active_names:
+                report["archived_channels"]["skipped"].append({
+                    "name": name,
+                    "reason": "already_active",
+                })
+                warnings.append(
+                    f"archived_channel '{name}' skipped (already active)"
+                )
+                continue
+            if name in existing_archived_names:
+                report["archived_channels"]["skipped"].append({
+                    "name": name,
+                    "reason": "already_archived",
+                })
+                warnings.append(
+                    f"archived_channel '{name}' skipped (already archived)"
+                )
+                continue
+            archived_channels.append(entry)
+            existing_archived_names.add(name)
+            report["archived_channels"]["created"].append(name)
 
     return report
