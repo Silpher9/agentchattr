@@ -451,41 +451,50 @@ function renderArchivedList() {
         unarchBtn.onclick = (e) => { e.stopPropagation(); unarchiveChannel(name); };
         actions.appendChild(unarchBtn);
 
+        // Inline 2-step confirm for the destructive delete path.
+        // Using two explicit named handlers instead of swapping+rebinding
+        // prevents state-leak after Cancel: the "enter confirm" handler
+        // is the only one ever attached to delBtn when the row is in
+        // its normal state, so a second click after Cancel re-enters
+        // confirm mode instead of firing the delete directly.
         const delBtn = document.createElement('button');
         delBtn.className = 'archived-action archived-action-delete';
         delBtn.textContent = 'Delete permanently';
-        delBtn.onclick = (e) => {
+        const originalDelLabel = delBtn.textContent;
+        let cancelBtn = null;
+
+        const enterConfirmMode = (e) => {
             e.stopPropagation();
-            // Inline 2-step confirm for the destructive path.
             if (row.classList.contains('confirm-delete')) return;
             row.classList.add('confirm-delete');
-            const originalText = delBtn.textContent;
             delBtn.textContent = 'Confirm delete?';
             unarchBtn.style.display = 'none';
 
-            const cancelBtn = document.createElement('button');
+            cancelBtn = document.createElement('button');
             cancelBtn.className = 'archived-action archived-action-cancel';
             cancelBtn.textContent = 'Cancel';
+            cancelBtn.onclick = (ev) => { ev.stopPropagation(); revertConfirmMode(); };
             actions.appendChild(cancelBtn);
 
-            const revert = () => {
-                row.classList.remove('confirm-delete');
-                delBtn.textContent = originalText;
-                unarchBtn.style.display = '';
-                cancelBtn.remove();
-                delBtn.onclick = (ev) => {
-                    ev.stopPropagation();
-                    deleteArchivedChannel(name);
-                };
-            };
-
-            // Swap the onclick so the next click fires the delete.
-            delBtn.onclick = (ev) => {
-                ev.stopPropagation();
-                deleteArchivedChannel(name);
-            };
-            cancelBtn.onclick = (ev) => { ev.stopPropagation(); revert(); };
+            delBtn.onclick = performDelete;
         };
+        const performDelete = (e) => {
+            e.stopPropagation();
+            deleteArchivedChannel(name);
+            // No revertConfirmMode here — the server will broadcast
+            // updated settings and the whole row will be re-rendered.
+        };
+        const revertConfirmMode = () => {
+            row.classList.remove('confirm-delete');
+            delBtn.textContent = originalDelLabel;
+            unarchBtn.style.display = '';
+            if (cancelBtn) {
+                cancelBtn.remove();
+                cancelBtn = null;
+            }
+            delBtn.onclick = enterConfirmMode;
+        };
+        delBtn.onclick = enterConfirmMode;
         actions.appendChild(delBtn);
 
         row.appendChild(actions);
@@ -495,6 +504,7 @@ function renderArchivedList() {
 
 function toggleArchivedPopover(force) {
     const popover = document.getElementById('channel-archived-popover');
+    const btn = document.getElementById('channel-archived-btn');
     if (!popover) return;
     const willShow = force !== undefined
         ? force
@@ -502,6 +512,26 @@ function toggleArchivedPopover(force) {
     if (willShow) {
         popover.classList.remove('hidden');
         renderArchivedList();
+        // Position: fixed anchor to the trigger button's rect so
+        // ancestor overflow/clipping (e.g. .channel-main has
+        // `overflow: hidden`) cannot hide the popover. Re-measure
+        // each time the popover opens so window resizes / mobile
+        // orientation changes are handled.
+        if (btn) {
+            const btnRect = btn.getBoundingClientRect();
+            const popWidth = Math.max(popover.offsetWidth, 300);
+            const margin = 8;
+            // Prefer right-aligning the popover with the button so it
+            // grows to the left on the desktop layout; clamp to the
+            // visible viewport to avoid overflow on narrow windows.
+            let left = btnRect.right - popWidth;
+            if (left < margin) left = margin;
+            const maxLeft = window.innerWidth - popWidth - margin;
+            if (left > maxLeft) left = Math.max(margin, maxLeft);
+            const top = btnRect.bottom + 4;
+            popover.style.left = left + 'px';
+            popover.style.top = top + 'px';
+        }
         // Close on outside click
         setTimeout(() => {
             document.addEventListener('click', _archivedPopoverOutsideClick);

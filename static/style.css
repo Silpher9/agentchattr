@@ -1425,11 +1425,15 @@ main#timeline {
 }
 .channel-archived-btn.hidden { display: none; }
 
+/* Popover uses position: fixed so it is never clipped by
+   .channel-main's overflow: hidden (which is there to contain the
+   horizontally-scrolling tab row). JS in toggleArchivedPopover()
+   sets `top`/`left` relative to the trigger button's viewport rect
+   each time the popover opens. */
 .channel-archived-popover {
-    position: absolute;
-    top: 100%;
+    position: fixed;
+    top: 0;
     left: 0;
-    margin-top: 4px;
     min-width: 300px;
     max-width: 420px;
     max-height: 360px;
