@@ -261,13 +261,22 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
     # any data import runs, then teach resolve_channel() to route
     # historical data into those names without adding them to the
     # active channel_list.
-    restored_archived_names: set[str] = set()
+    #
+    # Follow-up blocker fix: resolve_channel() must respect ALL archived
+    # names — both the ones freshly restored from the manifest AND the
+    # ones already in the target's archived_channels at import time. If
+    # the zip has data on a channel that the target already had in its
+    # archived list, skipping the merge as "already_archived" is
+    # correct, but resolve_channel() must still route the historical
+    # data into the archived channel without auto-promoting it.
+    all_archived_names: set[str] = set()
+    if isinstance(archived_channels, list):
+        for ac in archived_channels:
+            existing_name = ac.get("name") if isinstance(ac, dict) else ac
+            if existing_name:
+                all_archived_names.add(existing_name)
     manifest_archived = manifest.get("archived_channels") or []
     if isinstance(archived_channels, list) and manifest_archived:
-        existing_archived_names = {
-            (ac.get("name") if isinstance(ac, dict) else ac)
-            for ac in archived_channels
-        }
         active_names_snapshot = set(channel_list)
         for raw in manifest_archived:
             if isinstance(raw, dict):
@@ -295,7 +304,12 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
                     f"archived_channel '{name}' skipped (already active)"
                 )
                 continue
-            if name in existing_archived_names:
+            if name in all_archived_names:
+                # Already-archived collision. The local entry wins, but
+                # we still need to keep the name in all_archived_names
+                # so resolve_channel() below does NOT auto-promote it
+                # when the zip has historical data scoped to this
+                # channel.
                 report["archived_channels"]["skipped"].append({
                     "name": name,
                     "reason": "already_archived",
@@ -305,8 +319,7 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
                 )
                 continue
             archived_channels.append(entry)
-            existing_archived_names.add(name)
-            restored_archived_names.add(name)
+            all_archived_names.add(name)
             report["archived_channels"]["created"].append(name)
 
     # Collect existing UIDs for dedup
@@ -330,12 +343,13 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
             return "general"
         if ch in channel_list:
             return ch
-        # Issue #13 v2 blocker fix: names that have just been restored
-        # into archived_channels must NOT be auto-created into the
-        # active channel_list. Historical data still flows into the
-        # channel (the name is returned), but the channel stays
-        # read-only/archived after the import.
-        if ch in restored_archived_names:
+        # Issue #13 v2 blocker fix: ALL archived names must be
+        # respected — both newly-restored ones (just merged from the
+        # manifest) AND names that were already in the target's
+        # archived_channels at import time. Historical data still
+        # flows into the channel (the name is returned), but the
+        # channel stays read-only/archived after the import.
+        if ch in all_archived_names:
             return ch
         # Try to auto-create
         if len(channel_list) < max_channels:

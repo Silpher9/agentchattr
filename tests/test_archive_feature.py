@@ -471,6 +471,87 @@ class ArchiveRoundTripTests(unittest.TestCase):
         self.assertIsNotNone(planning_summary)
         self.assertEqual(planning_summary["uid"], "summary-planning")
 
+    def test_already_archived_target_with_data_in_zip_stays_archived(self):
+        """Regression test for the second stap-5 blocker @codex2 flagged:
+
+        When the TARGET already has a channel in its archived list and
+        the import zip contains historical data for that same channel
+        (plus the same name in manifest.archived_channels), the merge
+        correctly reports "already_archived" for the name, but
+        resolve_channel() used to still auto-promote it into
+        channel_list while importing the messages/jobs/summaries. Net
+        result: active+archived collision.
+
+        The fix teaches resolve_channel() to respect ALL archived
+        names (pre-existing + newly restored), so historical data
+        still lands in the channel but the channel stays read-only.
+        """
+        # Seed source with data on "planning" and archive it.
+        seed_history(
+            self.source_store,
+            self.source_jobs,
+            self.source_rules,
+            self.source_summaries,
+        )
+        source_archived = [
+            {"name": "planning", "archived_at": 100.0, "archived_by": "codex"},
+        ]
+        blob = archive.build_export(
+            self.source_store,
+            self.source_jobs,
+            self.source_rules,
+            self.source_summaries,
+            app_version="test",
+            archived_channels=source_archived,
+        )
+
+        # Target ALREADY has "planning" in its archived_channels list
+        # (with a different archived_by/archived_at), and "general" as
+        # the only active channel.
+        channel_list = ["general"]
+        target_archived = [
+            {"name": "planning", "archived_at": 999.0, "archived_by": "Ingmar"},
+        ]
+        report = archive.import_archive(
+            blob,
+            self.target_store,
+            self.target_jobs,
+            self.target_rules,
+            self.target_summaries,
+            channel_list,
+            max_channels=8,
+            archived_channels=target_archived,
+        )
+
+        self.assertTrue(report["ok"])
+        # The archived-merge correctly skipped the dup.
+        self.assertEqual(report["archived_channels"]["created"], [])
+        self.assertEqual(len(report["archived_channels"]["skipped"]), 1)
+        self.assertEqual(report["archived_channels"]["skipped"][0]["name"], "planning")
+        self.assertEqual(
+            report["archived_channels"]["skipped"][0]["reason"],
+            "already_archived",
+        )
+        # Critical: "planning" must NOT have been auto-promoted to
+        # active while message/job/summary import ran.
+        self.assertEqual(
+            channel_list, ["general"],
+            f"expected channel_list to stay ['general'], got {channel_list}",
+        )
+        self.assertNotIn("planning", report["channels"]["created"])
+        # Local archived entry must still be intact (not overwritten).
+        self.assertEqual(len(target_archived), 1)
+        self.assertEqual(target_archived[0]["name"], "planning")
+        self.assertEqual(target_archived[0]["archived_by"], "Ingmar")
+        self.assertEqual(target_archived[0]["archived_at"], 999.0)
+        # Historical data still landed in the channel.
+        messages = self.target_store.get_recent(count=100, channel="planning")
+        self.assertEqual(len(messages), 2)
+        imported_jobs = self.target_jobs.list_all(channel="planning")
+        self.assertEqual(len(imported_jobs), 1)
+        planning_summary = self.target_summaries.get("planning")
+        self.assertIsNotNone(planning_summary)
+
     def test_build_export_coerces_legacy_string_archived_channels(self):
         """A caller passing a raw string list is coerced to the canonical dict form."""
         blob = archive.build_export(
