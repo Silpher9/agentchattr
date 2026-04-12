@@ -4986,17 +4986,20 @@ footer {
 
 /* --- Phone --- */
 @media (max-width: 480px) {
-    /* Header: minimal — hide logo, compact agent status */
+    /* Header: minimal — logo-only branding, compact agent status */
     header {
         padding: 6px 8px;
     }
 
     .header-logo {
-        display: none;
+        width: 28px;
+        height: 28px;
+        max-width: 28px;
+        max-height: 28px;
     }
 
     header h1 {
-        font-size: 13px;
+        display: none;
     }
 
     .header-left {
