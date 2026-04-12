@@ -59,6 +59,7 @@ room_settings: dict = {
     # {"name": str, "archived_at": float, "archived_by": str}.
     "archived_channels": [],
     "history_limit": "all",
+    "theme": "dark",
     "contrast": "normal",
     "custom_roles": [],
 }
@@ -1315,6 +1316,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         router.max_hops = hops
                     except (ValueError, TypeError):
                         pass
+                if "theme" in new and new["theme"] in ("dark", "light"):
+                    room_settings["theme"] = new["theme"]
                 if "contrast" in new and new["contrast"] in ("normal", "high"):
                     room_settings["contrast"] = new["contrast"]
                 if "rules_refresh_interval" in new:

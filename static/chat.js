@@ -1874,6 +1874,10 @@ function applySettings(data) {
     if (data.history_limit !== undefined) {
         document.getElementById('setting-history').value = String(data.history_limit);
     }
+    if (data.theme) {
+        document.body.classList.toggle('light-theme', data.theme === 'light');
+        document.getElementById('setting-theme').value = data.theme;
+    }
     if (data.contrast) {
         document.body.classList.toggle('high-contrast', data.contrast === 'high');
         document.getElementById('setting-contrast').value = data.contrast;
@@ -1986,6 +1990,7 @@ function saveSettings() {
     const newHops = document.getElementById('setting-hops').value;
     const histVal = document.getElementById('setting-history').value;
     const newHistory = histVal === 'all' ? 'all' : (parseInt(histVal) || 50);
+    const newTheme = document.getElementById('setting-theme').value;
     const newContrast = document.getElementById('setting-contrast').value;
     const newRulesRefresh = document.getElementById('setting-rules-refresh').value;
 
@@ -1997,6 +2002,7 @@ function saveSettings() {
                 font: newFont,
                 max_agent_hops: parseInt(newHops) || 4,
                 history_limit: newHistory,
+                theme: newTheme,
                 contrast: newContrast,
                 rules_refresh_interval: parseInt(newRulesRefresh) || 0,
             }
@@ -2021,10 +2027,13 @@ function setupSettingsKeys() {
     }
 
     // Auto-save on change for selects, escape to close
-    for (const id of ['setting-font', 'setting-history', 'setting-contrast', 'setting-rules-refresh']) {
+    for (const id of ['setting-font', 'setting-history', 'setting-theme', 'setting-contrast', 'setting-rules-refresh']) {
         const el = document.getElementById(id);
         el.addEventListener('change', () => {
-            // Apply contrast immediately (don't wait for server round-trip)
+            // Apply theme/contrast immediately (don't wait for server round-trip)
+            if (id === 'setting-theme') {
+                document.body.classList.toggle('light-theme', el.value === 'light');
+            }
             if (id === 'setting-contrast') {
                 document.body.classList.toggle('high-contrast', el.value === 'high');
             }

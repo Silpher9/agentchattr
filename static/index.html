@@ -11,7 +11,7 @@
     <meta name="mobile-web-app-capable" content="yes">
     <link rel="manifest" href="/static/manifest.json">
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
-    <link rel="stylesheet" href="/static/style.css?v=260">
+    <link rel="stylesheet" href="/static/style.css?v=261">
     <link rel="stylesheet" href="/static/sessions.css?v=224">
     <link rel="stylesheet" href="/static/jobs.css?v=225">
     <link rel="icon" href="/static/favicon.ico">
@@ -108,6 +108,13 @@
                     <option value="100">100</option>
                     <option value="200">200</option>
                     <option value="500">500</option>
+                </select>
+            </div>
+            <div class="settings-field">
+                <label for="setting-theme">Theme</label>
+                <select id="setting-theme">
+                    <option value="dark">Dark</option>
+                    <option value="light">Light</option>
                 </select>
             </div>
             <div class="settings-field">
@@ -376,7 +383,7 @@
     <script src="/static/channels.js?v=224"></script>
     <script src="/static/rules-panel.js?v=223"></script>
     <script src="/static/launch-panel.js?v=2"></script>
-    <script src="/static/chat.js?v=276"></script>
+    <script src="/static/chat.js?v=277"></script>
     <script>
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js', {scope: '/'});
