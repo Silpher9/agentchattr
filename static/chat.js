@@ -527,11 +527,12 @@ function connectWebSocket() {
                 if (loader) loader.classList.add('hidden');
                 filterMessagesByChannel();
                 renderChannelTabs();
-                document.getElementById('messages').classList.remove('loading-history');
                 // Ensure refresh/reconnect lands on the latest visible message.
+                // Scroll first, then reveal — prevents visible snap from top to bottom.
                 requestAnimationFrame(() => {
                     autoScroll = true;
                     scrollToBottom();
+                    document.getElementById('messages').classList.remove('loading-history');
                 });
             }
         } else if (event.type === 'typing') {
