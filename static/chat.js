@@ -409,6 +409,7 @@ function connectWebSocket() {
 
     ws.onopen = () => {
         console.log('WebSocket connected');
+        document.getElementById('messages').classList.add('loading-history');
         if (reconnectTimer) {
             clearTimeout(reconnectTimer);
             reconnectTimer = null;
@@ -526,6 +527,7 @@ function connectWebSocket() {
                 if (loader) loader.classList.add('hidden');
                 filterMessagesByChannel();
                 renderChannelTabs();
+                document.getElementById('messages').classList.remove('loading-history');
                 // Ensure refresh/reconnect lands on the latest visible message.
                 requestAnimationFrame(() => {
                     autoScroll = true;
@@ -922,8 +924,10 @@ function appendMessage(msg) {
 
     if (msgChannel !== activeChannel) return;  // don't scroll for hidden messages
 
-    if (autoScroll) {
+    if (autoScroll && soundEnabled) {
         scrollToBottom();
+    } else if (!soundEnabled) {
+        // During history load, skip scroll — status event handles final scroll
     } else {
         unreadCount++;
         updateScrollAnchor();
@@ -2681,7 +2685,7 @@ function setupScroll() {
 
     // Keep pinned to bottom when content changes (e.g. images load)
     const resizeObserver = new ResizeObserver(() => {
-        if (autoScroll) {
+        if (autoScroll && soundEnabled) {
             scrollToBottom();
         }
     });

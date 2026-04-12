@@ -1153,6 +1153,11 @@ main#timeline {
     animation: msg-in 0.2s ease-out both;
 }
 
+.loading-history .message {
+    animation: none;
+    opacity: 1;
+}
+
 /* --- Message highlight flash --- */
 
 .message.highlight .chat-bubble {
