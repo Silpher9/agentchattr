@@ -5150,26 +5150,16 @@ footer {
         display: none;
     }
 
-    /* Issue #15: attach button — primary upload method on phone */
-    #attach-btn {
-        min-width: 44px;
-        min-height: 44px;
-        padding: 0 8px;
-        border-radius: var(--radius-md);
-    }
-
-    /* Session launch button: touch-friendly */
-    #session-launch-btn {
-        min-width: 44px;
-        min-height: 44px;
-        padding: 8px;
-    }
-
+    /* Issue #17: two-row composer — textarea full width, buttons below */
     #input-row {
-        gap: 4px;
+        flex-wrap: wrap;
+        gap: 6px;
     }
 
     #input {
+        order: -1;
+        width: 100%;
+        flex: none;
         padding: 10px 12px;
         font-size: 16px; /* Prevents iOS zoom on focus */
         min-height: 44px;
@@ -5177,19 +5167,34 @@ footer {
         border-radius: var(--radius-md);
     }
 
-    #send {
-        min-height: 44px;
-        padding: 0 14px;
-        font-size: 13px;
+    /* Action buttons: compact row below textarea */
+    #session-launch-btn {
+        min-width: 40px;
+        min-height: 40px;
+        padding: 6px;
+    }
+
+    #attach-btn {
+        min-width: 40px;
+        min-height: 40px;
+        padding: 0 6px;
         border-radius: var(--radius-md);
     }
 
     .send-group {
+        margin-left: auto;
         border-radius: var(--radius-md);
     }
 
     .send-group #send {
         border-radius: var(--radius-md) 0 0 var(--radius-md);
+    }
+
+    #send {
+        min-height: 40px;
+        padding: 0 14px;
+        font-size: 13px;
+        border-radius: var(--radius-md);
     }
 
     .send-clock {
