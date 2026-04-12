@@ -3334,6 +3334,7 @@ function openImageModal(url) {
     }
     updateModalImage(modal);
     modal.classList.remove('hidden');
+    history.pushState({imageModal: true}, '');
 }
 
 function updateModalImage(modal) {
@@ -3367,8 +3368,20 @@ function modalNext(event) {
 
 function closeImageModal() {
     const modal = document.getElementById('image-modal');
-    if (modal) modal.classList.add('hidden');
+    if (!modal || modal.classList.contains('hidden')) return;
+    modal.classList.add('hidden');
+    // Pop the history entry pushed by openImageModal, unless back button already did
+    if (history.state && history.state.imageModal) {
+        history.back();
+    }
 }
+
+window.addEventListener('popstate', (e) => {
+    const modal = document.getElementById('image-modal');
+    if (modal && !modal.classList.contains('hidden')) {
+        modal.classList.add('hidden');
+    }
+});
 
 async function _preserveScroll(fn) {
     const timeline = document.getElementById('timeline');
