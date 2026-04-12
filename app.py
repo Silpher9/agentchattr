@@ -207,6 +207,8 @@ def _install_security_middleware(token: str, cfg: dict):
     }
     if host not in ("127.0.0.1", "localhost", "::1"):
         allowed_origins.add(f"http://{host}:{port}")
+    for extra in cfg.get("server", {}).get("allowed_origins", []):
+        allowed_origins.add(extra.rstrip("/"))
 
     class SecurityMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):

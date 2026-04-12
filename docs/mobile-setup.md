@@ -190,7 +190,13 @@ This creates a home screen shortcut that opens agentchattr directly. Note: this 
 
 - The IP in `config.local.toml` must match exactly the IP you access in the browser
 - After changing `config.local.toml`, restart agentchattr
-- Check that you're using `http://` (not `https://`)
+- If you're using **Tailscale Serve** (HTTPS proxy), add the HTTPS origin to `allowed_origins`:
+  ```toml
+  [server]
+  host = "100.64.x.x"
+  allowed_origins = ["https://your-machine.tailnet.ts.net"]
+  ```
+- If not using Tailscale Serve, check that you're using `http://` (not `https://`)
 
 ### Agents not responding
 
