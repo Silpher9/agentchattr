@@ -2618,6 +2618,11 @@ async function uploadImage(file) {
         const resp = await fetch('/api/upload', { method: 'POST', headers: { 'X-Session-Token': SESSION_TOKEN }, body: form });
         const data = await resp.json();
 
+        if (!resp.ok) {
+            showToast(data.error || 'Upload failed', 'error');
+            return;
+        }
+
         pendingAttachments.push({
             path: data.path,
             name: data.name,
@@ -2627,6 +2632,7 @@ async function uploadImage(file) {
         renderAttachments();
     } catch (err) {
         console.error('Upload failed:', err);
+        showToast('Upload failed: ' + err.message, 'error');
     }
 }
 

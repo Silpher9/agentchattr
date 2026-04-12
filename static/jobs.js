@@ -1184,10 +1184,15 @@ async function uploadJobImage(file) {
     try {
         const resp = await fetch('/api/upload', { method: 'POST', headers: { 'X-Session-Token': window.SESSION_TOKEN }, body: form });
         const data = await resp.json();
+        if (!resp.ok) {
+            if (window.showToast) window.showToast(data.error || 'Upload failed', 'error');
+            return;
+        }
         jobPendingAttachments.push({ path: data.path, name: data.name, url: data.url });
         renderJobAttachments();
     } catch (err) {
         console.error('Job upload failed:', err);
+        if (window.showToast) window.showToast('Upload failed: ' + err.message, 'error');
     }
 }
 
