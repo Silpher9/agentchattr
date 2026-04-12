@@ -441,7 +441,7 @@ body.archive-no-select * {
     padding: 2px 4px;
     margin: 0;
 }
-.jobs-conv-title:hover { background: rgba(255,255,255,0.05); }
+.jobs-conv-title:hover { background: var(--white-06); }
 
 .job-title-input {
     width: 100%;
@@ -455,7 +455,7 @@ body.archive-no-select * {
     padding: 2px 4px;
     outline: none;
 }
-.job-title-input:focus { border-color: rgba(255,255,255,0.3); }
+.job-title-input:focus { border-color: var(--border-strong); }
 
 .jobs-status-toggles {
     display: flex;
@@ -513,7 +513,7 @@ body.archive-no-select * {
     margin: 0;
     font-size: 12px;
     line-height: 1.5;
-    color: rgba(255, 255, 255, 0.75);
+    color: var(--text);
     border-left: 3px solid rgba(168, 85, 247, 0.5);
     background: rgba(168, 85, 247, 0.06);
     border-bottom: 1px solid var(--border);
@@ -573,7 +573,7 @@ body.archive-no-select * {
     gap: 4px;
     opacity: 0;
     transition: opacity 0.12s ease;
-    background: linear-gradient(to left, var(--bg-header), rgba(20, 20, 31, 0));
+    background: linear-gradient(to left, var(--bg-header), transparent);
     padding-left: 12px;
     min-height: 20px;
 }
@@ -1061,7 +1061,7 @@ body.archive-no-select * {
 .convert-job-pill:hover {
     opacity: 1 !important;
     color: var(--bubble-color, var(--text));
-    border-color: var(--bubble-color, rgba(255, 255, 255, 0.3));
+    border-color: var(--bubble-color, var(--border-strong));
     background: color-mix(in srgb, var(--bubble-color, #888) 15%, transparent);
 }
 
@@ -1114,7 +1114,7 @@ body.archive-no-select * {
     padding: 10px 14px;
     font-size: 12px;
     line-height: 1.5;
-    color: rgba(255, 255, 255, 0.7);
+    color: var(--text);
     margin-bottom: 14px;
 }
 
@@ -1230,7 +1230,7 @@ body.archive-no-select * {
 }
 
 .job-breadcrumb-link:hover {
-    background: rgba(255, 255, 255, 0.07);
+    background: var(--white-08);
     border-color: var(--white-12);
     color: var(--text);
 }
@@ -1261,7 +1261,7 @@ body.archive-no-select * {
 }
 
 .job-group-summary:hover {
-    background: rgba(255, 255, 255, 0.07);
+    background: var(--white-08);
     border-color: var(--white-12);
     color: var(--text);
 }

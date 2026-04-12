@@ -15,7 +15,7 @@
 #session-bar.hidden { display: none; }
 
 #session-bar.session-elsewhere {
-    background: linear-gradient(90deg, #161624 0%, #1b1b2b 100%);
+    background: linear-gradient(90deg, var(--bg) 0%, var(--bg-header) 100%);
     border-bottom-color: var(--border-strong);
 }
 
