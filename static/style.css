@@ -3333,6 +3333,27 @@ footer {
     color: var(--text-dim);
 }
 
+/* Issue #15: attach button — mirrors #mic styling */
+#attach-btn {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    color: var(--text-dim);
+    padding: 0 10px;
+    min-height: 40px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: color 0.2s, border-color 0.2s;
+}
+
+#attach-btn:hover {
+    color: var(--text);
+    border-color: var(--accent);
+}
+
 #mic {
     background: none;
     border: 1px solid var(--border);
@@ -5118,6 +5139,14 @@ footer {
     /* Hide sender label on small phones */
     .sender-label {
         display: none;
+    }
+
+    /* Issue #15: attach button — primary upload method on phone */
+    #attach-btn {
+        min-width: 44px;
+        min-height: 44px;
+        padding: 0 8px;
+        border-radius: var(--radius-md);
     }
 
     /* Session launch button: touch-friendly */

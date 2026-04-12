@@ -247,6 +247,7 @@ function init() {
     setupInput();
     setupDragDrop();
     setupPaste();
+    setupFilePicker();
     setupScroll();
     setupSettingsKeys();
     setupKeyboardShortcuts();
@@ -2565,6 +2566,49 @@ function setupDragDrop() {
         }
     });
 }
+
+// --- Issue #15: explicit file picker for mobile/tablet ---
+
+function triggerFilePicker() {
+    const fileInput = document.getElementById('file-picker');
+    if (!fileInput) return;
+
+    // Guard #1 (codex2): capture upload target BEFORE file picker opens.
+    // onmousedown="event.preventDefault()" on the button keeps activeElement
+    // on the previously focused textarea, so we can check it here.
+    const jobInput = document.getElementById('jobs-conv-input-text');
+    const isJobFocused = jobInput && document.activeElement === jobInput;
+    fileInput.dataset.target = isJobFocused ? 'job' : 'chat';
+
+    fileInput.click();
+}
+
+function setupFilePicker() {
+    const fileInput = document.getElementById('file-picker');
+    if (!fileInput) return;
+
+    fileInput.addEventListener('change', async () => {
+        const files = fileInput.files;
+        if (!files || files.length === 0) return;
+
+        const isJob = fileInput.dataset.target === 'job';
+
+        for (const file of files) {
+            if (file.type.startsWith('image/')) {
+                if (isJob) {
+                    await uploadJobImage(file);
+                } else {
+                    await uploadImage(file);
+                }
+            }
+        }
+
+        // Guard #2 (codex2): reset so the same file can be re-selected
+        fileInput.value = '';
+    });
+}
+
+window.triggerFilePicker = triggerFilePicker;
 
 async function uploadImage(file) {
     const form = new FormData();
