@@ -2917,26 +2917,44 @@ def _list_tmux_instance_names() -> list[str]:
     return names
 
 
-def _tmux_session_exists(instance_name: str) -> bool:
-    """Return True if a tmux session for this agentchattr instance is live."""
-    return instance_name in _list_tmux_instance_names()
+def _family_runtime_snapshot(base_name: str) -> tuple[set[str], set[str]]:
+    """Snapshot of live runtime members of an agent family (tmux + registry).
+
+    A family member is any tmux session or registered instance whose name is
+    either `base_name` itself or starts with `base_name-` (slot names like
+    `claude-2` and custom aliases like `claude-prime` that share the base).
+    Used by the visible-launch grace-period check so we can distinguish
+    "family already existed" from "this launch produced a new runtime".
+    """
+    prefix = f"{base_name}-"
+    tmux = {
+        n for n in _list_tmux_instance_names()
+        if n == base_name or n.startswith(prefix)
+    }
+    reg: set[str] = set()
+    if registry is not None:
+        reg = {i["name"] for i in registry.get_instances_for(base_name)}
+    return tmux, reg
 
 
 async def _await_runtime_liveness(
-    agent_name: str,
+    base_name: str,
+    pre: tuple[set[str], set[str]],
     timeout: float = 8.0,
     interval: float = 0.25,
 ) -> bool:
-    """Poll until an agent runtime is really alive (tmux session or registry entry)
-    or the bounded grace period expires. Issue #23: a visible CLI launch must not
-    report success until a real runtime is observable.
+    """Poll until this launch has produced a NEW family runtime member, or the
+    bounded grace period expires. Issue #23: a visible CLI launch must not
+    report success until a new runtime is observable — and must stay negative
+    when only pre-existing family members are visible (e.g. slot-1 already
+    renamed to `claude-prime`).
     """
     import time as _time
+    pre_tmux, pre_reg = pre
     deadline = _time.monotonic() + timeout
     while True:
-        if _tmux_session_exists(agent_name):
-            return True
-        if registry is not None and registry.is_registered(agent_name):
+        cur_tmux, cur_reg = _family_runtime_snapshot(base_name)
+        if (cur_tmux - pre_tmux) or (cur_reg - pre_reg):
             return True
         if _time.monotonic() >= deadline:
             return False
@@ -3212,6 +3230,7 @@ async def launch_agent(agent_name: str, request: Request):
     log_file = open(log_path, "w")
 
     visible_launched = False
+    pre_snapshot: tuple[set[str], set[str]] | None = None
     try:
         if mode == "visible" and not is_api and sys.platform != "win32":
             # Visible mode: open a terminal emulator running the wrapper
@@ -3221,6 +3240,10 @@ async def launch_agent(agent_name: str, request: Request):
                     term_cmd = ["gnome-terminal", "--", "bash", "-c", f"cd {cwd} && {cmd}"]
                 else:  # xterm
                     term_cmd = ["xterm", "-e", "sh", "-c", f"cd {cwd} && {cmd}"]
+                # Snapshot family runtime BEFORE spawning so the liveness check
+                # can distinguish "this launch produced a new runtime" from
+                # "a family member was already running under a custom name".
+                pre_snapshot = _family_runtime_snapshot(agent_name)
                 # Capture terminal-launcher stderr so log tail can surface launcher errors.
                 proc = subprocess.Popen(
                     term_cmd, cwd=cwd,
@@ -3253,10 +3276,13 @@ async def launch_agent(agent_name: str, request: Request):
 
     _launched[agent_name] = {"proc": proc, "mode": mode}
 
-    # Issue #23: visible launches must not report success until a real runtime is
-    # observable. Bounded grace-period poll on tmux session + registry registration.
-    if visible_launched:
-        runtime_ok = await _await_runtime_liveness(agent_name, timeout=8.0, interval=0.25)
+    # Issue #23: visible launches must not report success until a NEW family
+    # runtime member appears (tmux session or registry entry) that wasn't
+    # already there pre-launch. Bounded grace-period poll.
+    if visible_launched and pre_snapshot is not None:
+        runtime_ok = await _await_runtime_liveness(
+            agent_name, pre=pre_snapshot, timeout=8.0, interval=0.25,
+        )
         if not runtime_ok:
             _launched.pop(agent_name, None)
             log_tail = _read_log_tail(log_path, n=40)
