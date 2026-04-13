@@ -2917,6 +2917,42 @@ def _list_tmux_instance_names() -> list[str]:
     return names
 
 
+def _tmux_session_exists(instance_name: str) -> bool:
+    """Return True if a tmux session for this agentchattr instance is live."""
+    return instance_name in _list_tmux_instance_names()
+
+
+async def _await_runtime_liveness(
+    agent_name: str,
+    timeout: float = 8.0,
+    interval: float = 0.25,
+) -> bool:
+    """Poll until an agent runtime is really alive (tmux session or registry entry)
+    or the bounded grace period expires. Issue #23: a visible CLI launch must not
+    report success until a real runtime is observable.
+    """
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    while True:
+        if _tmux_session_exists(agent_name):
+            return True
+        if registry is not None and registry.is_registered(agent_name):
+            return True
+        if _time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(interval)
+
+
+def _read_log_tail(path: Path, n: int = 40) -> str:
+    """Return the last n lines of a launch log, best-effort."""
+    try:
+        with open(path, "r", errors="replace") as f:
+            lines = f.readlines()
+    except Exception:
+        return ""
+    return "".join(lines[-n:])
+
+
 def _find_tmux_instance_name(name: str) -> str | None:
     """Find the raw tmux instance name for a canonical or historical agent name."""
     session_names = _list_tmux_instance_names()
@@ -3175,6 +3211,7 @@ async def launch_agent(agent_name: str, request: Request):
     log_path = data_dir / f"{agent_name}_launch.log"
     log_file = open(log_path, "w")
 
+    visible_launched = False
     try:
         if mode == "visible" and not is_api and sys.platform != "win32":
             # Visible mode: open a terminal emulator running the wrapper
@@ -3184,7 +3221,12 @@ async def launch_agent(agent_name: str, request: Request):
                     term_cmd = ["gnome-terminal", "--", "bash", "-c", f"cd {cwd} && {cmd}"]
                 else:  # xterm
                     term_cmd = ["xterm", "-e", "sh", "-c", f"cd {cwd} && {cmd}"]
-                proc = subprocess.Popen(term_cmd, cwd=cwd)
+                # Capture terminal-launcher stderr so log tail can surface launcher errors.
+                proc = subprocess.Popen(
+                    term_cmd, cwd=cwd,
+                    stdout=log_file, stderr=log_file,
+                )
+                visible_launched = True
             else:
                 # No terminal found — fall back to headless
                 mode = "background"
@@ -3210,6 +3252,25 @@ async def launch_agent(agent_name: str, request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
     _launched[agent_name] = {"proc": proc, "mode": mode}
+
+    # Issue #23: visible launches must not report success until a real runtime is
+    # observable. Bounded grace-period poll on tmux session + registry registration.
+    if visible_launched:
+        runtime_ok = await _await_runtime_liveness(agent_name, timeout=8.0, interval=0.25)
+        if not runtime_ok:
+            _launched.pop(agent_name, None)
+            log_tail = _read_log_tail(log_path, n=40)
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "Launch did not produce a runtime within 8s. Terminal may have failed to open or the wrapper exited immediately.",
+                    "log_tail": log_tail,
+                    "command": cmd,
+                    "mode": mode,
+                },
+                status_code=504,
+            )
+
     return JSONResponse({"ok": True, "command": cmd, "mode": mode})
 
 

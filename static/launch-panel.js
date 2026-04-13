@@ -8,6 +8,8 @@
 let _launchData = {};  // agent_name → {command, label, color, type, running, launchable, ui_launched, supports_attach, mode}
 let _launchRoot = '';  // repo root path from server
 let _runningInstances = [];  // concrete runtime instances from tmux/API wrappers
+let _launchStarting = new Set();  // agent_names in the grace-period window (issue #23)
+let _launchErrors = {};  // agent_name → {error, log_tail} from the last failed launch
 let _launchRefreshTimer = null;
 
 // ---------------------------------------------------------------------------
@@ -146,9 +148,15 @@ function renderLaunchPanel() {
             const uiLaunched = info.ui_launched;
             const canLaunch = info.launchable;
             const isApi = info.type === 'api';
+            const isStarting = _launchStarting.has(name);
+            const lastError = _launchErrors[name];
 
             const typeTag = isApi
                 ? '<span class="launch-type-tag">API</span>'
+                : '';
+
+            const startingTag = isStarting
+                ? '<span class="launch-starting-tag">starting…</span>'
                 : '';
 
             const accountHtml = info.account
@@ -170,14 +178,26 @@ function renderLaunchPanel() {
                     actionBtns += `<button class="launch-attach-btn" onclick="event.stopPropagation();attachAgent('${name}')" title="Open terminal">⬛</button>`;
                 }
             } else if (canLaunch) {
+                const startDisabled = isStarting ? 'disabled' : '';
                 if (isApi) {
-                    actionBtns = `<button class="launch-start-btn" onclick="event.stopPropagation();launchAgent('${name}', 'background', this)">▶</button>`;
+                    actionBtns = `<button class="launch-start-btn" ${startDisabled} onclick="event.stopPropagation();launchAgent('${name}', 'background', this)">▶</button>`;
                 } else {
-                    actionBtns = `<button class="launch-start-btn" onclick="event.stopPropagation();launchAgent('${name}', 'visible', this)" title="Launch with terminal">▶</button>`;
+                    actionBtns = `<button class="launch-start-btn" ${startDisabled} onclick="event.stopPropagation();launchAgent('${name}', 'visible', this)" title="Launch with terminal">▶</button>`;
                 }
             } else {
                 actionBtns = `<button class="launch-start-btn" disabled title="Add stopper to config to enable UI launch">▶</button>`;
             }
+
+            const errorBannerHtml = lastError
+                ? `<div class="launch-error-banner">
+                       <div class="launch-error-row">
+                           <span class="launch-error-title">Launch failed</span>
+                           <button class="launch-error-dismiss" onclick="event.stopPropagation();dismissLaunchError('${name}')" title="Dismiss">×</button>
+                       </div>
+                       <div class="launch-error-msg">${window.escapeHtml(lastError.error || 'Unknown error')}</div>
+                       ${lastError.log_tail ? `<pre class="launch-error-log">${window.escapeHtml(lastError.log_tail)}</pre>` : ''}
+                   </div>`
+                : '';
 
             card.innerHTML = `
                 <div class="launch-card-header">
@@ -187,9 +207,11 @@ function renderLaunchPanel() {
                         ${accountHtml}
                     </div>
                     ${typeTag}
+                    ${startingTag}
                     <span style="flex:1"></span>
                     <div class="launch-actions">${actionBtns}</div>
                 </div>
+                ${errorBannerHtml}
                 <div class="launch-cmd-toggle" onclick="this.nextElementSibling.classList.toggle('hidden')">
                     ▸ <code class="launch-cmd-preview">${window.escapeHtml(info.command).substring(0, 50)}${info.command.length > 50 ? '…' : ''}</code>
                 </div>
@@ -233,6 +255,11 @@ async function launchAgent(name, mode, btn) {
     const cb = document.querySelector(`.launch-approve-cb[data-agent="${name}"]`);
     const autoApprove = cb ? cb.checked : false;
 
+    // Show visible 'starting…' state and clear any prior error banner (issue #23).
+    _launchStarting.add(name);
+    delete _launchErrors[name];
+    renderLaunchPanel();
+
     try {
         const resp = await fetch(`/api/launch/${name}`, {
             method: 'POST',
@@ -242,17 +269,29 @@ async function launchAgent(name, mode, btn) {
             },
             body: JSON.stringify({ extra_args: extraArgs, mode, auto_approve: autoApprove }),
         });
-        const data = await resp.json();
+        const data = await resp.json().catch(() => ({}));
+        _launchStarting.delete(name);
         if (resp.ok) {
             await fetchLaunchCommands();
         } else {
             console.error('Launch failed:', data.error);
-            if (btn) btn.disabled = false;
+            _launchErrors[name] = {
+                error: data.error || `HTTP ${resp.status} ${resp.statusText}`,
+                log_tail: data.log_tail || '',
+            };
+            renderLaunchPanel();
         }
     } catch (e) {
         console.error('Launch error:', e);
-        if (btn) btn.disabled = false;
+        _launchStarting.delete(name);
+        _launchErrors[name] = { error: e.message || 'Network error', log_tail: '' };
+        renderLaunchPanel();
     }
+}
+
+function dismissLaunchError(name) {
+    delete _launchErrors[name];
+    renderLaunchPanel();
 }
 
 async function stopAgent(name) {
@@ -318,6 +357,7 @@ function updateLaunchStatus(statusData) {
 
 window.toggleLaunchPanel = toggleLaunchPanel;
 window.launchAgent = launchAgent;
+window.dismissLaunchError = dismissLaunchError;
 window.stopAgent = stopAgent;
 window.attachAgent = attachAgent;
 window.updateLaunchStatus = updateLaunchStatus;

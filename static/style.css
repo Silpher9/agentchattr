@@ -4797,6 +4797,58 @@ footer {
     background: color-mix(in srgb, var(--success) 15%, transparent);
     color: var(--success);
 }
+.launch-starting-tag {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: var(--radius);
+    background: color-mix(in srgb, var(--accent, #4a90e2) 15%, transparent);
+    color: var(--accent, #4a90e2);
+}
+.launch-error-banner {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid color-mix(in srgb, var(--danger, #d9534f) 40%, transparent);
+    background: color-mix(in srgb, var(--danger, #d9534f) 8%, transparent);
+    border-radius: var(--radius);
+    font-size: 12px;
+}
+.launch-error-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.launch-error-title {
+    font-weight: 600;
+    color: var(--danger, #d9534f);
+    flex: 1;
+}
+.launch-error-dismiss {
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 16px;
+    line-height: 1;
+    padding: 0 4px;
+    cursor: pointer;
+    opacity: 0.7;
+}
+.launch-error-dismiss:hover {
+    opacity: 1;
+}
+.launch-error-msg {
+    margin-top: 4px;
+}
+.launch-error-log {
+    margin-top: 6px;
+    padding: 6px 8px;
+    max-height: 160px;
+    overflow: auto;
+    background: var(--bg-muted, rgba(0,0,0,0.15));
+    border-radius: var(--radius);
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
 .launch-actions {
     display: flex;
     gap: 4px;
