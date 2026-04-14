@@ -21,6 +21,7 @@ How it works:
 import json
 import os
 import shutil
+import signal
 import sys
 import threading
 import time
@@ -391,6 +392,49 @@ def _notify_recovery(data_dir: Path, agent_name: str):
         pass
 
 
+def _last_name_path(data_dir: Path, base: str) -> Path:
+    return data_dir / f"{base}_last_name"
+
+
+def _persist_last_name(data_dir: Path, base: str, name: str) -> None:
+    """Best-effort atomic write of the last assigned name for this base family.
+
+    Used so a fresh wrapper start can hand the server a `prev_name` hint that
+    matches #28 step-2 reclaim semantics. Only the name string is stored —
+    no tokens or other secrets.
+    """
+    if not name:
+        return
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        target = _last_name_path(data_dir, base)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(name, "utf-8")
+        tmp.replace(target)
+    except Exception:
+        pass
+
+
+def _load_last_name(data_dir: Path, base: str) -> str | None:
+    """Best-effort read of the persisted last-name. Returns only when the
+    stored name belongs to the same base family; anything else is discarded
+    so the #28 step-2 guardrails never see a cross-family hint.
+    """
+    try:
+        raw = _last_name_path(data_dir, base).read_text("utf-8").strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    if raw == base:
+        return raw
+    if raw.startswith(f"{base}-"):
+        suffix = raw[len(base) + 1:]
+        if suffix.isdigit() and int(suffix) >= 1:
+            return raw
+    return None
+
+
 _IDENTITY_HINT = (
     " (If this is a multi-instance session, reclaim your previous identity from "
     "your context window, NOT from the chat history before responding. If you "
@@ -579,8 +623,15 @@ def main():
     server_port = config.get("server", {}).get("port", 8300)
     mcp_cfg = config.get("mcp", {})
 
+    # #28 step 3: if a prior run persisted its assigned name, hand it to the
+    # server as a same-family prev_name hint. The server-side reclaim path
+    # only releases a matching reservation — never an active identity — so
+    # this is safe to always pass when available.
+    prev_name_hint = _load_last_name(data_dir, agent)
     try:
-        registration = _register_instance(server_port, agent, args.label)
+        registration = _register_instance(
+            server_port, agent, args.label, prev_name=prev_name_hint,
+        )
     except Exception as exc:
         print(f"  Registration failed ({exc}).")
         print("  Wrapper cannot continue without a registered identity.")
@@ -589,6 +640,7 @@ def main():
     assigned_name = registration["name"]
     assigned_token = registration["token"]
     print(f"  Registered as: {assigned_name} (slot {registration.get('slot', '?')})")
+    _persist_last_name(data_dir, agent, assigned_name)
 
     proxy = None
     proxy_url = None
@@ -676,6 +728,10 @@ def main():
         if changed:
             if new_name and new_name != old_name:
                 print(f"  Identity updated: {old_name} -> {new_name}")
+                # #28 step 3: keep the persisted last-name in sync with the
+                # live identity so the next wrapper start has an accurate
+                # prev_name hint even when recovery rotated the name.
+                _persist_last_name(data_dir, agent, current_name)
             if new_token and new_token != old_token:
                 print(f"  Session refreshed for @{current_name}")
             _rewrite_mcp_config(current_name, current_token)
@@ -907,9 +963,24 @@ def main():
         run_kwargs["session_name"] = unix_session_name
         run_kwargs["headless"] = args.headless
 
-    try:
-        run_agent(**run_kwargs)
-    finally:
+    # #28 step 3: route SIGHUP/SIGTERM through SystemExit so the existing
+    # `finally` cleanup path runs a best-effort graceful deregister. Without
+    # this, tmux kill-session (SIGHUP) terminated the wrapper before
+    # deregister could fire, leaving a stale slot-1 entry that pushed any
+    # fresh wrapper onto slot 2 (`claude-1` + `claude-2` pathology).
+    def _handle_shutdown_signal(signum, _frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _handle_shutdown_signal)
+
+    _dereg_done = threading.Event()
+
+    def _graceful_deregister():
+        if _dereg_done.is_set():
+            return
+        _dereg_done.set()
         try:
             current_name, _ = get_identity()
             current_token = get_token()
@@ -923,6 +994,11 @@ def main():
             print(f"  Deregistered {current_name}")
         except Exception:
             pass
+
+    try:
+        run_agent(**run_kwargs)
+    finally:
+        _graceful_deregister()
 
         if proxy is not None:
             proxy.stop()
