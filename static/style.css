@@ -18,6 +18,7 @@
 
     /* --- Text --- */
     --text: #b8b8c8;
+    --text-strong: #f0f0f5;
     --text-dim: #6a6a80;
     --text-system: #555570;
     --text-on-accent: #fff;
@@ -157,6 +158,7 @@ body.light-theme {
     --border-subtle: rgba(0, 0, 0, 0.08);
 
     --text: #2d3a2e;
+    --text-strong: #1a241b;
     --text-dim: #5a6b5c;
     --text-system: #7a8a7c;
     --text-on-accent: #fff;
@@ -2214,7 +2216,7 @@ main#timeline {
 .msg-text p:first-child { margin-top: 0; }
 .msg-text p:last-child { margin-bottom: 0; }
 
-.msg-text strong { font-weight: 700; color: #f0f0f5; }
+.msg-text strong { font-weight: 700; color: var(--text-strong); }
 .msg-text em { font-style: italic; }
 
 .msg-text code {
@@ -2266,7 +2268,7 @@ main#timeline {
     margin: 6px 0 2px;
     font-size: 1em;
     font-weight: 700;
-    color: #f0f0f5;
+    color: var(--text-strong);
 }
 
 .msg-text h1 { font-size: 1.15em; }
@@ -2297,7 +2299,7 @@ main#timeline {
 }
 
 .msg-text th {
-    background: rgba(255, 255, 255, 0.05);
+    background: var(--white-06);
     font-weight: 600;
 }
 
