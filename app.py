@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import re as _re
 import subprocess
 import sys
@@ -3236,8 +3237,17 @@ async def launch_agent(agent_name: str, request: Request):
             # Visible mode: open a terminal emulator running the wrapper
             terminal = _find_terminal()
             if terminal:
+                term_env = None
                 if terminal == "gnome-terminal":
                     term_cmd = ["gnome-terminal", "--", "bash", "-c", f"cd {cwd} && {cmd}"]
+                    # Issue #27: drop stale GNOME Terminal DBus screen/service vars
+                    # inherited from the server's parent env; otherwise gnome-terminal
+                    # attaches to a dead object path and fails with
+                    # "Failed to get screen from object path ...".
+                    term_env = {
+                        k: v for k, v in os.environ.items()
+                        if k not in ("GNOME_TERMINAL_SCREEN", "GNOME_TERMINAL_SERVICE")
+                    }
                 else:  # xterm
                     term_cmd = ["xterm", "-e", "sh", "-c", f"cd {cwd} && {cmd}"]
                 # Snapshot family runtime BEFORE spawning so the liveness check
@@ -3248,6 +3258,7 @@ async def launch_agent(agent_name: str, request: Request):
                 proc = subprocess.Popen(
                     term_cmd, cwd=cwd,
                     stdout=log_file, stderr=log_file,
+                    env=term_env,
                 )
                 visible_launched = True
             else:
