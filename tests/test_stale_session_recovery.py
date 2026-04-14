@@ -19,7 +19,15 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from socketserver import ThreadingMixIn
 from urllib.request import Request, urlopen
+
+
+class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """Threaded HTTP server — required for parallel stub tests where a fan-in
+    barrier holds N concurrent requests before any responds."""
+
+    daemon_threads = True
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -150,10 +158,33 @@ class StaleRetryWhitelistTests(unittest.TestCase):
 
 
 class _StubUpstream:
-    """Tiny HTTP server that serves /mcp responses from a scripted list."""
+    """Tiny HTTP server that serves /mcp responses.
 
-    def __init__(self, responses: list[bytes]):
-        self._responses = list(responses)
+    Two modes:
+      - FIFO scripted list (`responses=[...]`): pops one body per request.
+        Used by single-request tests where order of arrival is deterministic.
+      - Token-aware (`token_responder=callable`): body is chosen by the
+        request's `Authorization` header. Used by the parallel test so that
+        retries always land on the "fresh" branch regardless of arrival
+        order, eliminating the timing flakiness codex2 flagged.
+
+    An optional `barrier` holds incoming requests until N threads have
+    arrived, giving tests a hard guarantee that all parallel calls reach
+    upstream with the pre-flip token before any response flips the shared
+    state.
+    """
+
+    def __init__(
+        self,
+        responses: list[bytes] | None = None,
+        token_responder=None,
+        barrier: threading.Barrier | None = None,
+    ):
+        if responses is None and token_responder is None:
+            raise ValueError("_StubUpstream requires responses or token_responder")
+        self._responses = list(responses or [])
+        self._token_responder = token_responder
+        self._barrier = barrier
         self._tokens_seen: list[str] = []
         self._lock = threading.Lock()
         self._server: HTTPServer | None = None
@@ -179,9 +210,27 @@ class _StubUpstream:
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
                 _ = self.rfile.read(length) if length else b""
+                auth = self.headers.get("Authorization", "")
                 with stub._lock:
-                    stub._tokens_seen.append(self.headers.get("Authorization", ""))
-                    body = stub._responses.pop(0) if stub._responses else _tool_result("ok")
+                    stub._tokens_seen.append(auth)
+                # Barrier forces a deterministic fan-in: all N callers must
+                # have arrived (with whatever token they were carrying at
+                # send-time) before any response flows, so retries under
+                # the refreshed token can't race back to the stub before
+                # the pre-flip wave has landed.
+                if stub._barrier is not None:
+                    try:
+                        stub._barrier.wait(timeout=5)
+                    except threading.BrokenBarrierError:
+                        pass
+                if stub._token_responder is not None:
+                    body = stub._token_responder(auth)
+                else:
+                    with stub._lock:
+                        body = (
+                            stub._responses.pop(0) if stub._responses
+                            else _tool_result("ok")
+                        )
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
@@ -190,7 +239,7 @@ class _StubUpstream:
                 self.end_headers()
                 self.wfile.write(body)
 
-        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        self._server = _ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 
@@ -311,62 +360,103 @@ class ProxyStaleSessionRetryTests(unittest.TestCase):
 
     def test_parallel_chat_reads_single_hook_fire(self):
         # PM guardrail 5 / reviewer point 1: single throttle is the only
-        # guard against cascading re-registers. Proxy itself has no extra
-        # throttle, so the hook may fire once per stale response — but the
-        # *wrapper-side* throttle (simulated here as a one-shot guard) must
-        # hold across parallel tool-calls. The first stale response flips
-        # the shared token; subsequent parallel calls with that token
-        # succeed and never call the hook again.
+        # guard against cascading re-registers. This test proves that
+        # parallel stale responses converge on a single token flip without
+        # sentinel leaks — deterministically, not timing-dependent.
+        #
+        # Determinism setup (codex2 herreview fix):
+        #   - Upstream chooses response by Authorization header:
+        #       old-token -> stale sentinel
+        #       new-token -> fresh payload
+        #     so the stub cannot run out of "fresh" responses regardless of
+        #     how many times retries fire.
+        #   - A threading.Barrier holds the first N initial requests until
+        #     they have all arrived at upstream carrying old-token. Only
+        #     then are their stale responses released, guaranteeing every
+        #     worker enters the recovery path with the pre-flip token.
+        #   - The hook is a one-shot flip guarded by a lock — the invariant
+        #     under test is "exactly one flip no matter how many parallel
+        #     workers hit the sentinel".
         stale = _tool_result(_STALE_SESSION_ERROR_SIGNATURE, is_error=True)
         fresh = _tool_result("messages: []")
-        # One stale per parallel request is pessimistic — all three upstream
-        # calls race, but only the first arrives with old-token. Emulate by
-        # scripting three responses: the first two concurrent arrivals may
-        # see stale, but after token flips, retries see fresh.
-        self._setup([stale, stale, stale, fresh, fresh, fresh])
+        N = 3
+        barrier = threading.Barrier(N)
+
+        def _responder(auth: str) -> bytes:
+            return stale if auth == "Bearer old-token" else fresh
+
+        # Fan-in barrier applies only to the first N pre-flip requests.
+        # Retries carry new-token and must not be delayed or held, so we
+        # install a dedicated stub with the barrier releasing after N hits.
+        # After the barrier is passed, subsequent calls skip the wait via
+        # BrokenBarrierError handling in _StubUpstream.
+        self.upstream = _StubUpstream(token_responder=_responder, barrier=barrier)
+        self.upstream.start()
+        self.proxy = McpIdentityProxy(
+            upstream_base=f"http://127.0.0.1:{self.upstream.port}",
+            upstream_path="/mcp",
+            agent_name="claude",
+            instance_token="old-token",
+        )
+        self.assertTrue(self.proxy.start())
 
         hook_lock = threading.Lock()
         hook_calls = []
-        token_state = {"current": "old-token", "flipped": False}
+        token_flipped = {"done": False}
 
         def _hook():
+            # Simulates the wrapper's shared 30s throttle: first call flips
+            # the proxy token, concurrent callers find it already flipped
+            # and return True (meaning: token is fresh, proceed to retry).
             with hook_lock:
-                # Simulate the wrapper's shared 30s throttle: once the token
-                # has been refreshed, subsequent hook calls within the
-                # throttle window return True without re-flipping.
-                if not token_state["flipped"]:
+                if not token_flipped["done"]:
                     hook_calls.append(True)
-                    token_state["current"] = "new-token"
-                    token_state["flipped"] = True
+                    token_flipped["done"] = True
                     self.proxy.token = "new-token"
-                return True
+            return True
 
         self.proxy.on_stale_session = _hook
 
-        results = [None, None, None]
+        results: list[bytes | None] = [None] * N
+        errors: list[BaseException] = []
 
-        def _worker(i):
-            results[i] = self._post_tool_call("chat_read", req_id=i + 1)
+        def _worker(i: int):
+            try:
+                results[i] = self._post_tool_call("chat_read", req_id=i + 1)
+            except BaseException as exc:  # noqa: BLE001 — test harness
+                errors.append(exc)
 
-        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(3)]
+        threads = [threading.Thread(target=_worker, args=(i,)) for i in range(N)]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=10)
 
-        # All three clients must eventually receive the fresh response —
-        # either via direct retry with the refreshed token, or (if a call
-        # raced ahead with already-flipped token state) via their own
-        # first-pass success.
-        for body in results:
-            self.assertIsNotNone(body)
-            self.assertIn(b"messages: []", body)
-            self.assertNotIn(_STALE_SESSION_ERROR_SIGNATURE.encode(), body)
+        self.assertEqual(errors, [], f"worker(s) raised: {errors}")
+        for i, body in enumerate(results):
+            self.assertIsNotNone(body, f"worker {i} produced no body")
+            self.assertIn(b"messages: []", body,
+                          f"worker {i} did not see fresh response: {body!r}")
+            self.assertNotIn(_STALE_SESSION_ERROR_SIGNATURE.encode(), body,
+                             f"worker {i} saw stale sentinel leak: {body!r}")
 
-        # Wrapper throttle (simulated) allowed exactly one token flip.
-        self.assertEqual(len(hook_calls), 1,
-                         "shared throttle must serialize re-registers even "
-                         "under parallel stale-sentinel responses")
+        self.assertEqual(
+            len(hook_calls), 1,
+            "shared throttle must collapse concurrent recoveries to exactly "
+            "one re-register, regardless of how many parallel workers hit "
+            "the stale sentinel in the same window",
+        )
+
+        # Token histogram: every worker's first-pass carried old-token (the
+        # barrier forced this), and every retry carried new-token.
+        tokens = self.upstream.tokens_seen
+        self.assertEqual(tokens.count("Bearer old-token"), N,
+                         "every initial request must have used old-token")
+        self.assertEqual(tokens.count("Bearer new-token"), N,
+                         "every retry must have used new-token")
+        self.assertEqual(len(tokens), 2 * N,
+                         "exactly N initial calls + N retries — no extra or "
+                         "missing upstream hits")
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +504,7 @@ class _StubSseUpstream:
                 self.end_headers()
                 self.wfile.write(stub._sse_body)
 
-        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        self._server = _ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
 
