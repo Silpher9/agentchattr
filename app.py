@@ -349,7 +349,6 @@ def configure(cfg: dict, session_token: str = ""):
     _data_dir = Path(data_dir)
 
     _known_online: set[str] = set()  # agents we've seen join — track for leave messages
-    _posted_leave: set[str] = set()  # agents we've already posted a leave for — debounce
 
     _known_active = set()
 
@@ -443,7 +442,7 @@ def configure(cfg: dict, session_token: str = ""):
                         store.add(name, f"{name} disconnected", msg_type="leave", channel=_last_active_channel)
 
                 # Clear leave debounce for agents that came back online
-                _posted_leave -= currently_online
+                _posted_leave.difference_update(currently_online)
 
                 # Detect other agents (non-registered) going offline
                 went_offline = (_known_online - currently_online) - timed_out
@@ -524,6 +523,18 @@ def configure(cfg: dict, session_token: str = ""):
 
 _event_loop = None  # set by run.py after starting the event loop
 _last_active_channel: str = "general"  # last channel any message was sent in
+
+# Debounce set for "disconnected" leave messages — shared between the
+# background crash-timeout reaper and the register-time stale-family reap
+# (#28) so a name cannot receive two leave notifications for the same
+# offline transition.
+_posted_leave: set[str] = set()
+
+# Reclaim-grace for register-time stale-family reap (#28). Matches the
+# 60s crash-timeout semantics used by the background reaper; the short
+# PRESENCE_TIMEOUT (30s) is deliberately NOT used here to avoid reaping
+# an instance that is merely in tool-call jitter rather than truly dead.
+_STALE_FAMILY_REAP_GRACE = 60
 
 
 def set_event_loop(loop):
@@ -2336,6 +2347,97 @@ async def get_rules_freshness():
     return JSONResponse(rules.agent_freshness())
 
 
+def _reap_stale_family(base: str) -> list[str]:
+    """Reap stale instances in the `base` family before assigning a new slot.
+
+    Addresses #28: after a server restart (or any event that stops a wrapper
+    from heartbeating), the dead entry lingers in the registry until the
+    background crash-timeout reaper runs. If a new wrapper registers during
+    that window, it is slotted as a duplicate (e.g. `claude` becomes
+    `claude-1` and the newcomer becomes `claude-2`). By sweeping genuinely
+    stale family members here — before `registry.register` picks a slot —
+    a fresh registration can cleanly reclaim slot 1.
+
+    Scope is strict:
+      - only the requested base family is scanned;
+      - only entries with a recorded heartbeat older than the reclaim grace
+        are reaped (active instances and instances without a presence
+        record are left untouched);
+      - cleanup mirrors the path used by the crash-timeout reaper
+        (deregister + purge_identity + clean_renames_for + leave message);
+      - one pass per register call — no retries, no identity rebuild.
+
+    Returns the names that were reaped, for callers that want to log the
+    scope of the reclaim.
+    """
+    import mcp_bridge
+    import time as _time
+
+    if registry is None or store is None:
+        return []
+
+    now = _time.time()
+    family = registry.get_instances_for(base)
+    if not family:
+        return []
+
+    # Snapshot presence under the bridge lock so concurrent heartbeats can't
+    # change a candidate's age between the decision and the reap.
+    candidates: list[tuple[str, float]] = []
+    with mcp_bridge._presence_lock:
+        for inst in family:
+            name = inst["name"]
+            candidates.append((name, mcp_bridge._presence.get(name, 0.0)))
+
+    reaped: list[str] = []
+    for name, last_seen in candidates:
+        # Owner-check: require a recorded heartbeat that is genuinely stale.
+        # last_seen == 0 means the entry never heartbeated (possibly a brand
+        # new registration whose presence touch is racing with us) — leave
+        # it alone rather than risk killing an active wrapper.
+        if last_seen <= 0:
+            continue
+        age = now - last_seen
+        if age <= _STALE_FAMILY_REAP_GRACE:
+            continue
+
+        log.info(
+            "Register reap (#28): deregistering stale family member "
+            f"{name} (base={base}, no heartbeat for {age:.1f}s)"
+        )
+        result = registry.deregister(name)
+        if not result:
+            continue
+        mcp_bridge.purge_identity(name)
+        registry.clean_renames_for(name)
+        # The normal deregister path reserves the slot for the GRACE_PERIOD
+        # so a wrapper reconnect keeps its name. For a reap we want the slot
+        # immediately free so the follow-up register can reclaim it cleanly.
+        registry.release_reservation(name)
+        renamed = result.pop("_renamed_back", None)
+        if renamed:
+            mcp_bridge.migrate_identity(renamed["old"], renamed["new"])
+            store.rename_sender(renamed["old"], renamed["new"])
+            if _event_loop:
+                rename_event = json.dumps({
+                    "type": "agent_renamed",
+                    "old_name": renamed["old"],
+                    "new_name": renamed["new"],
+                })
+                asyncio.run_coroutine_threadsafe(_broadcast(rename_event), _event_loop)
+        if name not in _posted_leave:
+            _posted_leave.add(name)
+            store.add(
+                name,
+                f"{name} disconnected (timeout)",
+                msg_type="leave",
+                channel=_last_active_channel,
+            )
+        reaped.append(name)
+
+    return reaped
+
+
 @app.post("/api/register")
 async def register_agent(request: Request):
     """Wrapper calls this to register a new agent instance."""
@@ -2347,6 +2449,9 @@ async def register_agent(request: Request):
     label = body.get("label")
     if not base:
         return JSONResponse({"error": "base is required"}, status_code=400)
+    # #28: sweep stale family members before slot assignment so a post-
+    # restart re-registration does not create duplicate instances.
+    _reap_stale_family(base)
     result = registry.register(base, label)
     if result is None:
         return JSONResponse({"error": f"unknown base: {base}"}, status_code=400)

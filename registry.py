@@ -555,6 +555,20 @@ class RuntimeRegistry:
                 del self._renames[k]
         self._save_renames()
 
+    def release_reservation(self, name: str) -> bool:
+        """Drop the post-deregister slot reservation for `name`.
+
+        Normal deregister (wrapper shutdown) reserves the name for
+        GRACE_PERIOD seconds so a reconnect keeps the same slot. When a
+        stale entry is reaped because the wrapper is dead (#28), the
+        reservation is actively harmful — it forces the next fresh
+        register into slot 2 and reproduces the duplicate-family bug the
+        reap is meant to prevent. Callers in that path call this to
+        release the hold immediately.
+        """
+        with self._lock:
+            return self._reserved.pop(name, None) is not None
+
     def _expire_reserved(self):
         """Remove expired reservations. Must hold lock."""
         now = time.time()
