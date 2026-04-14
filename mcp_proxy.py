@@ -49,16 +49,25 @@ _SENDER_PARAMS = {
     "chat_claim": "sender",
 }
 
-# Sentinel string returned by mcp_bridge when the bearer token is stale after a
-# server restart. Detected in JSON-RPC tool-result content so the proxy can
-# trigger wrapper-side re-register and (where safe) retry the call transparently.
-_STALE_SESSION_SENTINEL = "stale or unknown authenticated agent session"
+# Exact error signature returned by mcp_bridge when the bearer token is stale
+# after a server restart (see mcp_bridge._resolve_tool_identity). Detected in
+# JSON-RPC tool-result content so the proxy can trigger wrapper-side
+# re-register and (where safe) retry the call transparently.
+#
+# We match the FULL error string, not a substring, so a chat message whose
+# body happens to contain the phrase cannot trip the sentinel when surfaced
+# by chat_read. mcp_bridge wraps this error via FastMCP, which emits it as
+# an isError tool-result.
+_STALE_SESSION_ERROR_SIGNATURE = (
+    "Error: stale or unknown authenticated agent session. Re-register and retry."
+)
 
 # Tools that are safe to retry transparently after a stale-session re-register.
-# Strict read-only whitelist — anything that mutates server state is left to the
-# caller to retry with the refreshed token (avoids e.g. duplicate chat_send
-# posts on unlucky timing).
-_STALE_RETRY_TOOLS = {"chat_read", "chat_who", "chat_channels", "chat_resync", "chat_rules"}
+# Strict read-only whitelist — anything that mutates server state is left to
+# the caller to retry with the refreshed token (avoids e.g. duplicate
+# chat_send posts on unlucky timing). chat_rules is NOT on this list because
+# action="propose" mutates rule state + posts a timeline message.
+_STALE_RETRY_TOOLS = {"chat_read", "chat_who", "chat_channels", "chat_resync"}
 
 
 def _extract_tool_name(raw: bytes) -> str:
@@ -84,9 +93,19 @@ def _extract_tool_name(raw: bytes) -> str:
 
 def _response_has_stale_sentinel(resp_body: bytes) -> bool:
     """Parse a JSON-RPC response and return True iff a tool-result carries the
-    stale-session sentinel. Strict match on the known error-text inside
-    structured result.content[*].text — avoids false positives on chat messages
-    that happen to contain the phrase as plain user content."""
+    exact stale-session error signature.
+
+    Strict detection (codex2 guardrail 1):
+      - tool-result must be flagged as an error (`isError: true`) — a normal
+        `chat_read` response carrying user chat text is never flagged this
+        way by the MCP bridge, so even chat content that literally contains
+        the phrase cannot trip the sentinel;
+      - the matching text fragment must equal the full error signature, not
+        just contain the phrase as a substring. Tool-result text fragments
+        may be chunked, so we permit a fragment that strictly *equals* or is
+        prefixed by the signature, but never a loose substring anywhere in
+        arbitrary content.
+    """
     if not resp_body:
         return False
     try:
@@ -100,6 +119,8 @@ def _response_has_stale_sentinel(resp_body: bytes) -> bool:
         result = msg.get("result")
         if not isinstance(result, dict):
             continue
+        if result.get("isError") is not True:
+            continue
         content = result.get("content")
         if not isinstance(content, list):
             continue
@@ -107,7 +128,14 @@ def _response_has_stale_sentinel(resp_body: bytes) -> bool:
             if not isinstance(part, dict):
                 continue
             text = part.get("text")
-            if isinstance(text, str) and _STALE_SESSION_SENTINEL in text:
+            if not isinstance(text, str):
+                continue
+            # Accept exact match or the signature as a full prefix of a
+            # larger error blob, but reject arbitrary substring hits.
+            stripped = text.strip()
+            if stripped == _STALE_SESSION_ERROR_SIGNATURE:
+                return True
+            if stripped.startswith(_STALE_SESSION_ERROR_SIGNATURE):
                 return True
     return False
 
