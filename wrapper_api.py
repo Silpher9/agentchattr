@@ -21,6 +21,7 @@ How it works:
 import argparse
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -36,6 +37,50 @@ def _auth_headers(token: str, *, include_json: bool = False) -> dict[str, str]:
     if include_json:
         headers["Content-Type"] = "application/json"
     return headers
+
+
+def _last_name_path(data_dir: Path, base: str) -> Path:
+    return data_dir / f"{base}_last_name"
+
+
+def _persist_last_name(data_dir: Path, base: str, name: str) -> None:
+    """Best-effort atomic write of the last assigned name for this base family."""
+    if not name:
+        return
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        target = _last_name_path(data_dir, base)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(name, "utf-8")
+        tmp.replace(target)
+    except Exception:
+        pass
+
+
+def _load_last_name(data_dir: Path, base: str) -> str | None:
+    """Best-effort read of the persisted last-name."""
+    try:
+        raw = _last_name_path(data_dir, base).read_text("utf-8").strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    if raw == base:
+        return raw
+    if raw.startswith(f"{base}-"):
+        suffix = raw[len(base) + 1:]
+        if suffix.isdigit() and int(suffix) >= 1:
+            return raw
+    return None
+
+
+def _notify_recovery(data_dir: Path, agent_name: str):
+    """Write a flag file that the server picks up and broadcasts as a system message."""
+    try:
+        flag = data_dir / f"{agent_name}_recovered"
+        flag.write_text(agent_name, "utf-8")
+    except Exception:
+        pass
 
 
 def main():
@@ -89,8 +134,11 @@ def main():
         "You can see recent messages for context.")
 
     # Register with server
+    prev_name_hint = _load_last_name(data_dir, agent)
     try:
-        registration = _register_instance(server_port, agent, args.label)
+        registration = _register_instance(
+            server_port, agent, args.label, prev_name=prev_name_hint,
+        )
     except Exception as exc:
         print(f"  Registration failed ({exc}).")
         print("  Is the server running? Start it with: python run.py")
@@ -99,6 +147,7 @@ def main():
     name = registration["name"]
     token = registration["token"]
     print(f"  Registered as: {name} (slot {registration.get('slot', '?')})")
+    _persist_last_name(data_dir, agent, name)
 
     # Thread-safe identity state (can change via heartbeat rename)
     _lock = threading.Lock()
@@ -114,10 +163,14 @@ def main():
 
     def set_identity(new_name=None, new_token=None):
         with _lock:
+            old_name = _state["name"]
             if new_name:
                 _state["name"] = new_name
             if new_token:
                 _state["token"] = new_token
+            current_name = _state["name"]
+        if new_name and new_name != old_name:
+            _persist_last_name(data_dir, agent, current_name)
 
     def set_working(val):
         with _lock:
@@ -126,6 +179,33 @@ def main():
     def is_working():
         with _lock:
             return _state["working"]
+
+    _dereg_done = threading.Event()
+
+    def _graceful_deregister():
+        if _dereg_done.is_set():
+            return
+        _dereg_done.set()
+        try:
+            n = get_name()
+            t = get_token()
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{server_port}/api/deregister/{n}",
+                method="POST",
+                data=b"",
+                headers=_auth_headers(t),
+            )
+            urllib.request.urlopen(req, timeout=5)
+            print(f"  Deregistered {n}")
+        except Exception:
+            pass
+
+    def _handle_shutdown_signal(signum, _frame):
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, _handle_shutdown_signal)
 
     # Heartbeat thread — same pattern as wrapper.py
     def _heartbeat():
@@ -148,8 +228,12 @@ def main():
             except urllib.error.HTTPError as exc:
                 if exc.code == 409:
                     try:
-                        replacement = _register_instance(server_port, agent, args.label)
+                        n = get_name()
+                        replacement = _register_instance(
+                            server_port, agent, args.label, prev_name=n,
+                        )
                         set_identity(replacement["name"], replacement["token"])
+                        _notify_recovery(data_dir, replacement["name"])
                         print(f"  Re-registered as: {replacement['name']}")
                     except Exception:
                         pass
@@ -345,19 +429,7 @@ def main():
     except KeyboardInterrupt:
         print("\n  Shutting down...")
     finally:
-        try:
-            n = get_name()
-            t = get_token()
-            req = urllib.request.Request(
-                f"http://127.0.0.1:{server_port}/api/deregister/{n}",
-                method="POST",
-                data=b"",
-                headers=_auth_headers(t),
-            )
-            urllib.request.urlopen(req, timeout=5)
-            print(f"  Deregistered {n}")
-        except Exception:
-            pass
+        _graceful_deregister()
 
     print("  Wrapper stopped.")
 
