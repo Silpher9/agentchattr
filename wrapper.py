@@ -350,10 +350,17 @@ def _build_provider_launch(
     return launch_args, launch_env, inject_env, settings_path
 
 
-def _register_instance(server_port: int, base: str, label: str | None = None) -> dict:
+def _register_instance(server_port: int, base: str, label: str | None = None,
+                       prev_name: str | None = None) -> dict:
     import urllib.request
 
-    reg_body = json.dumps({"base": base, "label": label}).encode()
+    payload: dict = {"base": base, "label": label}
+    if prev_name:
+        # Optional reservation-reclaim hint (#28 step 2). Server hard-validates
+        # this against the base family and only releases a matching reservation;
+        # on any validation failure the register still proceeds normally.
+        payload["prev_name"] = prev_name
+    reg_body = json.dumps(payload).encode()
     reg_req = urllib.request.Request(
         f"http://127.0.0.1:{server_port}/api/register",
         method="POST",
@@ -719,7 +726,40 @@ def main():
     print(f"  @{assigned_name} mentions auto-inject MCP reads")
     print(f"  Starting {command} in {cwd}...\n")
 
-    _last_reregister = [0]  # timestamp of last 409 re-registration
+    _last_reregister = [0]  # timestamp of last successful 409/stale re-registration
+    _reregister_lock = threading.Lock()
+    _REREGISTER_THROTTLE = 30  # seconds — shared by heartbeat path and proxy stale-session hook
+
+    def _attempt_stale_reregister(source: str) -> bool:
+        """Throttled re-register shared by heartbeat-409 and mcp-proxy stale-session hook.
+
+        Returns True if the current token is fresh (either just re-registered or
+        re-registered within the throttle window). Returns False if this call
+        attempted a re-register and it failed, so callers can decide to skip the
+        retry.
+        """
+        with _reregister_lock:
+            now = time.time()
+            if now - _last_reregister[0] <= _REREGISTER_THROTTLE:
+                # Token was refreshed recently; treat as fresh without hammering the server.
+                return True
+            try:
+                current_name, _ = get_identity()
+                replacement = _register_instance(
+                    server_port, agent, args.label, prev_name=current_name,
+                )
+            except Exception as exc:
+                # Observability (#28 step 2): do not swallow silently — name the failure
+                # so we can distinguish "re-register failed" from "re-register never fired".
+                print(f"  [wrapper] re-register via {source} failed: "
+                      f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                return False
+            set_runtime_identity(replacement["name"], replacement["token"])
+            _notify_recovery(data_dir, replacement["name"])
+            _last_reregister[0] = now
+            print(f"  [wrapper] re-registered as {replacement['name']} (trigger: {source})",
+                  file=sys.stderr)
+            return True
 
     def _heartbeat():
         while True:
@@ -740,17 +780,7 @@ def main():
                     set_runtime_identity(server_name)
             except urllib.error.HTTPError as exc:
                 if exc.code == 409:
-                    # Throttle re-registration to once per 30s to prevent
-                    # cascading slot creation (gemini-2, gemini-3, ...)
-                    now = time.time()
-                    if now - _last_reregister[0] > 30:
-                        try:
-                            replacement = _register_instance(server_port, agent, args.label)
-                            set_runtime_identity(replacement["name"], replacement["token"])
-                            _notify_recovery(data_dir, replacement["name"])
-                            _last_reregister[0] = now
-                        except Exception:
-                            pass
+                    _attempt_stale_reregister("heartbeat-409")
                 time.sleep(5)
                 continue
             except Exception:
@@ -760,6 +790,9 @@ def main():
             time.sleep(5)
 
     threading.Thread(target=_heartbeat, daemon=True).start()
+
+    if proxy is not None:
+        proxy.on_stale_session = lambda: _attempt_stale_reregister("mcp-stale-session")
 
     _watcher_inject_fn = None
     _watcher_thread = None

@@ -2438,6 +2438,57 @@ def _reap_stale_family(base: str) -> list[str]:
     return reaped
 
 
+def _apply_prev_name_reclaim_hint(base: str, prev_name: str) -> bool:
+    """Release a post-deregister reservation for `prev_name` when the register
+    call carries a matching hint (#28 step 2).
+
+    Hard guardrails (codex2 review):
+      - prev_name must belong to the same base family as `base`;
+      - a currently-registered name is never released (no active-identity
+        theft even if the hint is malicious or stale);
+      - only the reservation is touched — no rename, no migrate, no purge;
+      - idempotent: calling again for the same prev_name is a no-op and
+        does not mutate state.
+
+    Returns True iff a reservation was released; False on any validation
+    failure or when no reservation was present. Never raises; register
+    must remain unaffected by a bad hint.
+    """
+    if registry is None:
+        return False
+    try:
+        prev_base, _prev_slot = registry._parse_name(prev_name)
+    except Exception:
+        return False
+    if prev_base != base:
+        log.debug(
+            "#28 prev_name hint rejected: different family (prev=%s, base=%s)",
+            prev_name, base,
+        )
+        return False
+    # Never release a name that is still actively registered; that would be
+    # on the reservation path but also implicitly permit a later register to
+    # race into an in-use slot.
+    try:
+        if registry.is_registered(prev_name):
+            log.debug(
+                "#28 prev_name hint rejected: %s is still actively registered",
+                prev_name,
+            )
+            return False
+    except Exception:
+        return False
+    try:
+        released = registry.release_reservation(prev_name)
+    except Exception:
+        return False
+    if released:
+        log.info("#28 prev_name hint: released reservation on %s (base=%s)", prev_name, base)
+    else:
+        log.debug("#28 prev_name hint: no reservation to release for %s", prev_name)
+    return released
+
+
 @app.post("/api/register")
 async def register_agent(request: Request):
     """Wrapper calls this to register a new agent instance."""
@@ -2447,11 +2498,20 @@ async def register_agent(request: Request):
         return JSONResponse({"error": "invalid JSON"}, status_code=400)
     base = body.get("base", "")
     label = body.get("label")
+    prev_name_raw = body.get("prev_name", "")
+    prev_name = prev_name_raw.strip() if isinstance(prev_name_raw, str) else ""
     if not base:
         return JSONResponse({"error": "base is required"}, status_code=400)
     # #28: sweep stale family members before slot assignment so a post-
     # restart re-registration does not create duplicate instances.
     _reap_stale_family(base)
+    # #28 step 2: optional reservation-reclaim hint. Strict validation:
+    # same base-family only, never releases an actively registered name,
+    # only touches reservations (no identity mutations). Any validation
+    # failure is silent (debug-log) — the register call must proceed
+    # independently of the hint.
+    if prev_name:
+        _apply_prev_name_reclaim_hint(base, prev_name)
     result = registry.register(base, label)
     if result is None:
         return JSONResponse({"error": f"unknown base: {base}"}, status_code=400)

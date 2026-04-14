@@ -49,6 +49,68 @@ _SENDER_PARAMS = {
     "chat_claim": "sender",
 }
 
+# Sentinel string returned by mcp_bridge when the bearer token is stale after a
+# server restart. Detected in JSON-RPC tool-result content so the proxy can
+# trigger wrapper-side re-register and (where safe) retry the call transparently.
+_STALE_SESSION_SENTINEL = "stale or unknown authenticated agent session"
+
+# Tools that are safe to retry transparently after a stale-session re-register.
+# Strict read-only whitelist — anything that mutates server state is left to the
+# caller to retry with the refreshed token (avoids e.g. duplicate chat_send
+# posts on unlucky timing).
+_STALE_RETRY_TOOLS = {"chat_read", "chat_who", "chat_channels", "chat_resync", "chat_rules"}
+
+
+def _extract_tool_name(raw: bytes) -> str:
+    """Return the tool name for a `tools/call` JSON-RPC request, else ''."""
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+    messages = data if isinstance(data, list) else [data]
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("method") != "tools/call":
+            continue
+        params = msg.get("params") or {}
+        name = params.get("name")
+        if isinstance(name, str) and name:
+            return name
+    return ""
+
+
+def _response_has_stale_sentinel(resp_body: bytes) -> bool:
+    """Parse a JSON-RPC response and return True iff a tool-result carries the
+    stale-session sentinel. Strict match on the known error-text inside
+    structured result.content[*].text — avoids false positives on chat messages
+    that happen to contain the phrase as plain user content."""
+    if not resp_body:
+        return False
+    try:
+        data = json.loads(resp_body)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    messages = data if isinstance(data, list) else [data]
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        result = msg.get("result")
+        if not isinstance(result, dict):
+            continue
+        content = result.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and _STALE_SESSION_SENTINEL in text:
+                return True
+    return False
+
 
 class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """HTTPServer that handles each request in a new thread.
@@ -96,6 +158,12 @@ class McpIdentityProxy:
         self._last_recovery_ok = False
         self._server: _ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        # Optional hook invoked when upstream returns the stale-session sentinel
+        # in a tool-result. Callable should trigger a throttled wrapper-side
+        # re-register (which updates `proxy.token`) and return True when the
+        # current token is fresh, False when re-register was attempted and
+        # failed. See wrapper.py `_attempt_stale_reregister`.
+        self.on_stale_session: "callable | None" = None
 
     @property
     def port(self) -> int:
@@ -219,6 +287,13 @@ class McpIdentityProxy:
                         if isinstance(item, dict) and item.get("method"):
                             return str(item.get("method") or "")
                 return ""
+
+            def _jsonrpc_tool_name(self, raw: bytes) -> str:
+                return _extract_tool_name(raw)
+
+            @staticmethod
+            def _response_has_stale_sentinel(resp_body: bytes) -> bool:
+                return _response_has_stale_sentinel(resp_body)
 
             def _build_upstream_request(
                 self,
@@ -415,6 +490,53 @@ class McpIdentityProxy:
                         "SSE MCP session lost for %s — automatic recovery is not implemented yet; client must reconnect",
                         proxy.agent_name,
                     )
+
+                # #28 step 2: upstream may return a tool-result with the
+                # stale-session sentinel (HTTP 200 body) when our bearer token
+                # was invalidated by a server restart. Detect it, trigger the
+                # wrapper-side re-register hook, and retry once for strictly
+                # read-only tools. POST /mcp only — SSE streams are never
+                # inspected or retried here (out of scope for this step).
+                if (
+                    is_streamable
+                    and status < 400
+                    and method_name == "tools/call"
+                    and self._response_has_stale_sentinel(resp_body)
+                ):
+                    tool_name = self._jsonrpc_tool_name(raw)
+                    log.warning(
+                        "MCP stale-session sentinel detected for %s (tool=%s)",
+                        proxy.agent_name, tool_name or "?",
+                    )
+                    hook = proxy.on_stale_session
+                    hook_fresh = False
+                    if hook is not None:
+                        try:
+                            hook_fresh = bool(hook())
+                        except Exception as exc:
+                            log.warning(
+                                "on_stale_session hook raised for %s: %s",
+                                proxy.agent_name, exc,
+                            )
+                    # Only retry idempotent reads; let state-mutating tools
+                    # (chat_send, chat_claim, chat_decision, ...) surface the
+                    # sentinel to the caller, who can retry with the refreshed
+                    # token if they choose. This avoids double-posts on races.
+                    if hook_fresh and tool_name in _STALE_RETRY_TOOLS:
+                        # Re-inject sender on a fresh copy of the request body
+                        # because proxy.agent_name may have changed.
+                        retry_body = self._maybe_inject_sender(raw)
+                        try:
+                            status, resp_body, resp_headers = self._send_upstream_request(
+                                "POST",
+                                data=retry_body,
+                                use_proxy_session=is_streamable and method_name != "initialize",
+                                extra_headers={"Content-Type": self.headers.get("Content-Type", "application/json")},
+                                timeout=30,
+                            )
+                        except (URLError, OSError) as e:
+                            self.send_error(502, f"Upstream error: {e}")
+                            return
 
                 fallback_session_id = ""
                 if is_streamable and status < 400 and method_name != "notifications/initialized":
