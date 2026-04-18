@@ -156,6 +156,14 @@ def main():
             sys.exit(1)
         else:
             print()
+            # Fail fast on non-TTY so headless launchers don't block on input()
+            # waiting forever. The guard itself is not bypassed — a real terminal
+            # is still required to type YES.
+            if not sys.stdin.isatty():
+                print("  !! Non-interactive session: cannot prompt for YES confirmation.", file=sys.stderr)
+                print("  Network exposure requires explicit confirmation from a terminal.", file=sys.stderr)
+                print("  Run from an interactive terminal, or bind to 127.0.0.1 for headless use.\n", file=sys.stderr)
+                sys.exit(1)
             try:
                 confirm = input("  Type YES to accept these risks and start: ").strip()
             except (EOFError, KeyboardInterrupt):
