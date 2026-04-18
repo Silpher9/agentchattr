@@ -39,6 +39,7 @@ from mcp_proxy import (
     _STALE_RETRY_TOOLS,
     _STALE_SESSION_ERROR_SIGNATURE,
     _extract_tool_name,
+    _iter_jsonrpc_payloads,
     _response_has_stale_sentinel,
 )
 
@@ -60,6 +61,18 @@ def _tool_result(text: str, req_id: int = 1, is_error: bool = False) -> bytes:
         "result": {"content": [{"type": "text", "text": text}], "isError": is_error},
     }
     return json.dumps(body).encode("utf-8")
+
+
+def _sse_frame(payload_json: bytes, *, event: str = "message", event_id: str | None = None) -> bytes:
+    """Wrap a JSON-RPC payload in an SSE frame, matching FastMCP's output
+    shape for streamable-http responses (default when is_json_response_enabled
+    is False — see #30 diagnose note)."""
+    lines = [f"event: {event}"]
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    data_line = payload_json.decode("utf-8") if isinstance(payload_json, bytes) else payload_json
+    lines.append(f"data: {data_line}")
+    return ("\n".join(lines) + "\n\n").encode("utf-8")
 
 
 class ToolNameExtractionTests(unittest.TestCase):
@@ -134,6 +147,97 @@ class StaleSentinelDetectionTests(unittest.TestCase):
         self.assertTrue(_response_has_stale_sentinel(body))
 
 
+class SseWrappedSentinelDetectionTests(unittest.TestCase):
+    """#30 H1: FastMCP streamable-http defaults to SSE-wrapped tool-call
+    responses (`is_json_response_enabled=False`). The detector must parse
+    those bodies as well as plain JSON, without regressing either path."""
+
+    def test_sse_wrapped_sentinel_is_detected(self):
+        payload = _tool_result(_STALE_SESSION_ERROR_SIGNATURE, is_error=True)
+        body = _sse_frame(payload)
+        self.assertTrue(_response_has_stale_sentinel(body))
+
+    def test_sse_wrapped_clean_result_is_not_flagged(self):
+        # Negative: a clean tool-result inside an SSE frame must not trip
+        # the detector. This is the main regression guard qwen3 flagged.
+        body = _sse_frame(_tool_result("messages: []"))
+        self.assertFalse(_response_has_stale_sentinel(body))
+
+    def test_sse_wrapped_chat_content_with_sentinel_substring(self):
+        # A chat_read response that happens to carry the signature inside
+        # user-authored text must never trip detection, even when SSE-wrapped.
+        inner = json.dumps([
+            {"sender": "user", "text": _STALE_SESSION_ERROR_SIGNATURE},
+        ])
+        body = _sse_frame(_tool_result(inner, is_error=False))
+        self.assertFalse(_response_has_stale_sentinel(body))
+
+    def test_sse_with_priming_event_before_data(self):
+        # FastMCP can emit a priming event with empty `data:` before the real
+        # payload. That priming frame must be skipped, not crash the parser.
+        priming = b"event: message\nid: priming\ndata: \n\n"
+        payload = _sse_frame(_tool_result(_STALE_SESSION_ERROR_SIGNATURE, is_error=True))
+        self.assertTrue(_response_has_stale_sentinel(priming + payload))
+
+    def test_sse_with_multiple_data_frames(self):
+        # Multi-frame body: clean frame followed by a stale-sentinel frame.
+        # Detection must inspect every frame, not just the first.
+        clean = _sse_frame(_tool_result("ok"))
+        stale = _sse_frame(_tool_result(_STALE_SESSION_ERROR_SIGNATURE, is_error=True))
+        self.assertTrue(_response_has_stale_sentinel(clean + stale))
+
+    def test_malformed_sse_body_returns_false_without_crashing(self):
+        # Any of these bodies could appear if the upstream misbehaves.
+        # None may crash, and none carry the sentinel so all must be False.
+        for body in (
+            b"event: message\ndata:\n\n",            # empty data
+            b"event: message\ndata: not-json\n\n",   # non-JSON payload
+            b"data: {\"broken\": ",                  # truncated JSON
+            b"event: message",                       # no blank-line terminator
+            b"\n\n\n\n",                             # only separators
+            b"\x00\x01\x02garbage",                  # binary noise
+        ):
+            self.assertFalse(
+                _response_has_stale_sentinel(body),
+                f"malformed SSE body must not trip detection: {body!r}",
+            )
+
+
+class IterJsonrpcPayloadsTests(unittest.TestCase):
+    """Covers the SSE-aware payload extractor added for #30 H1."""
+
+    def test_plain_json_object_yields_once(self):
+        body = _tool_result("ok")
+        self.assertEqual(list(_iter_jsonrpc_payloads(body)), [json.loads(body)])
+
+    def test_plain_json_array_yields_once(self):
+        arr = json.dumps([{"jsonrpc": "2.0", "id": 1, "result": {}},
+                          {"jsonrpc": "2.0", "id": 2, "result": {}}]).encode()
+        out = list(_iter_jsonrpc_payloads(arr))
+        self.assertEqual(len(out), 1)
+        self.assertIsInstance(out[0], list)
+
+    def test_sse_yields_each_data_line(self):
+        body = _sse_frame(_tool_result("a")) + _sse_frame(_tool_result("b"))
+        out = list(_iter_jsonrpc_payloads(body))
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["result"]["content"][0]["text"], "a")
+        self.assertEqual(out[1]["result"]["content"][0]["text"], "b")
+
+    def test_empty_body_yields_nothing(self):
+        self.assertEqual(list(_iter_jsonrpc_payloads(b"")), [])
+
+    def test_malformed_frames_are_skipped(self):
+        body = (
+            b"event: message\ndata: not-json\n\n"
+            + _sse_frame(_tool_result("ok"))
+            + b"event: message\ndata: {\"broken\":\n\n"
+        )
+        out = list(_iter_jsonrpc_payloads(body))
+        self.assertEqual(len(out), 1, "only the valid frame should be yielded")
+        self.assertEqual(out[0]["result"]["content"][0]["text"], "ok")
+
+
 class StaleRetryWhitelistTests(unittest.TestCase):
     def test_read_only_tools_are_retryable(self):
         for name in ("chat_read", "chat_who"):
@@ -179,12 +283,14 @@ class _StubUpstream:
         responses: list[bytes] | None = None,
         token_responder=None,
         barrier: threading.Barrier | None = None,
+        content_type: str = "application/json",
     ):
         if responses is None and token_responder is None:
             raise ValueError("_StubUpstream requires responses or token_responder")
         self._responses = list(responses or [])
         self._token_responder = token_responder
         self._barrier = barrier
+        self._content_type = content_type
         self._tokens_seen: list[str] = []
         self._lock = threading.Lock()
         self._server: HTTPServer | None = None
@@ -232,7 +338,7 @@ class _StubUpstream:
                             else _tool_result("ok")
                         )
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", stub._content_type)
                 self.send_header("Content-Length", str(len(body)))
                 # Provide a fake MCP-Session-Id so streamable-http stays happy.
                 self.send_header("Mcp-Session-Id", "stub-session")
@@ -357,6 +463,125 @@ class ProxyStaleSessionRetryTests(unittest.TestCase):
         self.assertEqual(called, [], "hook must not fire on clean responses")
         self.assertIn(b"ok", body)
         self.assertEqual(len(self.upstream.tokens_seen), 1)
+
+    def test_session_is_cleared_after_successful_token_refresh(self):
+        # #30 H2: when the stale-session hook successfully refreshes the
+        # token, the cached upstream session_id must be invalidated so the
+        # next MCP call re-runs initialize alongside the fresh token.
+        # Without this, a full server restart can leave the proxy stuck on
+        # a session that the new server instance never knew about.
+        stale = _tool_result(_STALE_SESSION_ERROR_SIGNATURE, is_error=True)
+        fresh = _tool_result("messages: []")
+        self._setup([stale, fresh])
+
+        # Simulate a previously-initialized streamable-http session.
+        self.proxy._set_upstream_session_id("pre-restart-session")
+
+        def _hook():
+            self.proxy.token = "new-token"
+            return True
+
+        self.proxy.on_stale_session = _hook
+
+        self._post_tool_call("chat_read")
+
+        self.assertIsNone(
+            self.proxy._get_upstream_session_id(),
+            "cached session_id must be cleared after successful token refresh "
+            "so the next call forces a clean re-init",
+        )
+
+    def test_session_is_not_cleared_when_hook_declines_refresh(self):
+        # Regression guard for #30 H2: if the hook returns False
+        # (re-register failed), the token is NOT fresh, and H2 must NOT
+        # fire. Session_id follows the standard "pick up from upstream
+        # response header" path, NOT a hard reset to None.
+        stale = _tool_result(_STALE_SESSION_ERROR_SIGNATURE, is_error=True)
+        self._setup([stale])
+        self.proxy.on_stale_session = lambda: False
+
+        self._post_tool_call("chat_read")
+
+        # The stub advertises "stub-session" in response headers, which the
+        # proxy normally caches. The H2 reset must NOT have fired, so we
+        # should see the cached session from the response, not None.
+        self.assertEqual(
+            self.proxy._get_upstream_session_id(),
+            "stub-session",
+            "failed hook must leave session_id following the normal "
+            "response-header update path, not the H2 reset path",
+        )
+
+    def test_session_is_not_cleared_on_clean_response(self):
+        # Regression guard for #30 H2: the session-reset must fire only in
+        # the stale-sentinel recovery path, never on normal responses.
+        self._setup([_tool_result("ok")])
+
+        def _hook_must_not_fire():
+            raise AssertionError("hook must not fire on clean response")
+
+        self.proxy.on_stale_session = _hook_must_not_fire
+
+        self._post_tool_call("chat_read")
+
+        self.assertEqual(
+            self.proxy._get_upstream_session_id(),
+            "stub-session",
+            "clean response must cache session_id from upstream, not reset it",
+        )
+
+    def test_full_restart_recovery_with_sse_response(self):
+        # End-to-end #30: simulate a full server restart. Upstream returns
+        # SSE-wrapped bodies (FastMCP's default streamable-http shape).
+        # The first response carries the stale-session sentinel, the retry
+        # must land on a fresh response and reach the client with the
+        # refreshed token. This is the exact scenario #30 was opened for:
+        # before H1, the SSE-wrapped sentinel would go undetected and the
+        # proxy would stay stale until a manual wrapper restart.
+        stale_sse = _sse_frame(_tool_result(_STALE_SESSION_ERROR_SIGNATURE, is_error=True))
+        fresh_sse = _sse_frame(_tool_result("messages: []"))
+
+        self.upstream = _StubUpstream(
+            responses=[stale_sse, fresh_sse],
+            content_type="text/event-stream",
+        )
+        self.upstream.start()
+        self.proxy = McpIdentityProxy(
+            upstream_base=f"http://127.0.0.1:{self.upstream.port}",
+            upstream_path="/mcp",
+            agent_name="claude",
+            instance_token="old-token",
+        )
+        self.assertTrue(self.proxy.start())
+        self.proxy._set_upstream_session_id("pre-restart-session")
+
+        hook_calls = []
+
+        def _hook():
+            hook_calls.append(True)
+            self.proxy.token = "post-restart-token"
+            return True
+
+        self.proxy.on_stale_session = _hook
+
+        body = self._post_tool_call("chat_read")
+
+        self.assertEqual(len(hook_calls), 1,
+                         "SSE-wrapped sentinel must trigger the hook exactly once")
+        self.assertIn(b"messages: []", body,
+                      "client must see the fresh retry payload")
+        self.assertNotIn(_STALE_SESSION_ERROR_SIGNATURE.encode(), body,
+                         "SSE-wrapped sentinel must not leak to the client after retry")
+        tokens = self.upstream.tokens_seen
+        self.assertEqual(tokens[0], "Bearer old-token",
+                         "first request carries the stale token")
+        self.assertEqual(tokens[1], "Bearer post-restart-token",
+                         "retry carries the freshly re-registered token")
+        self.assertIsNone(
+            self.proxy._get_upstream_session_id(),
+            "full-restart recovery must invalidate the cached session so the "
+            "next call re-initializes against the restarted server",
+        )
 
     def test_parallel_chat_reads_single_hook_fire(self):
         # PM guardrail 5 / reviewer point 1: single throttle is the only
