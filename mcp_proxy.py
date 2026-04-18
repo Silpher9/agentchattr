@@ -91,6 +91,43 @@ def _extract_tool_name(raw: bytes) -> str:
     return ""
 
 
+def _iter_jsonrpc_payloads(resp_body: bytes):
+    """Yield parsed JSON-RPC payloads from an MCP streamable-http response body.
+
+    Supports both response shapes FastMCP uses for `tools/call`:
+      - plain JSON (when `is_json_response_enabled=True`): one JSON object or array
+      - SSE event-stream (library default): `event: ...\\ndata: <json>\\n\\n` frames
+
+    Unrecognized lines and malformed JSON frames are silently skipped so callers
+    can treat the iterator as a best-effort payload source.
+    """
+    if not resp_body:
+        return
+    # Fast path: plain JSON body (identical to the pre-SSE behaviour).
+    try:
+        yield json.loads(resp_body)
+        return
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+    # Slow path: SSE frames. Per spec, events are blank-line separated and
+    # `data:` lines carry the payload. FastMCP emits one JSON payload per
+    # `data:` line, so we parse each such line independently.
+    try:
+        text = resp_body.decode("utf-8", "replace")
+    except Exception:
+        return
+    for line in text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].lstrip()
+        if not payload:
+            continue
+        try:
+            yield json.loads(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+
+
 def _response_has_stale_sentinel(resp_body: bytes) -> bool:
     """Parse a JSON-RPC response and return True iff a tool-result carries the
     exact stale-session error signature.
@@ -105,38 +142,39 @@ def _response_has_stale_sentinel(resp_body: bytes) -> bool:
         may be chunked, so we permit a fragment that strictly *equals* or is
         prefixed by the signature, but never a loose substring anywhere in
         arbitrary content.
+
+    Accepts both plain-JSON and SSE-wrapped response bodies so the detector
+    works regardless of which streamable-http response shape FastMCP emits
+    (SSE is the library default; see #30).
     """
     if not resp_body:
         return False
-    try:
-        data = json.loads(resp_body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return False
-    messages = data if isinstance(data, list) else [data]
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        result = msg.get("result")
-        if not isinstance(result, dict):
-            continue
-        if result.get("isError") is not True:
-            continue
-        content = result.get("content")
-        if not isinstance(content, list):
-            continue
-        for part in content:
-            if not isinstance(part, dict):
+    for data in _iter_jsonrpc_payloads(resp_body):
+        messages = data if isinstance(data, list) else [data]
+        for msg in messages:
+            if not isinstance(msg, dict):
                 continue
-            text = part.get("text")
-            if not isinstance(text, str):
+            result = msg.get("result")
+            if not isinstance(result, dict):
                 continue
-            # Accept exact match or the signature as a full prefix of a
-            # larger error blob, but reject arbitrary substring hits.
-            stripped = text.strip()
-            if stripped == _STALE_SESSION_ERROR_SIGNATURE:
-                return True
-            if stripped.startswith(_STALE_SESSION_ERROR_SIGNATURE):
-                return True
+            if result.get("isError") is not True:
+                continue
+            content = result.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                if not isinstance(text, str):
+                    continue
+                # Accept exact match or the signature as a full prefix of a
+                # larger error blob, but reject arbitrary substring hits.
+                stripped = text.strip()
+                if stripped == _STALE_SESSION_ERROR_SIGNATURE:
+                    return True
+                if stripped.startswith(_STALE_SESSION_ERROR_SIGNATURE):
+                    return True
     return False
 
 
@@ -525,6 +563,7 @@ class McpIdentityProxy:
                 # wrapper-side re-register hook, and retry once for strictly
                 # read-only tools. POST /mcp only — SSE streams are never
                 # inspected or retried here (out of scope for this step).
+                stale_token_refreshed = False
                 if (
                     is_streamable
                     and status < 400
@@ -546,6 +585,7 @@ class McpIdentityProxy:
                                 "on_stale_session hook raised for %s: %s",
                                 proxy.agent_name, exc,
                             )
+                    stale_token_refreshed = hook_fresh
                     # Only retry idempotent reads; let state-mutating tools
                     # (chat_send, chat_claim, chat_decision, ...) surface the
                     # sentinel to the caller, who can retry with the refreshed
@@ -571,6 +611,17 @@ class McpIdentityProxy:
                     fallback_session_id = self._update_session_from_headers(resp_headers)
                     if not fallback_session_id:
                         fallback_session_id = proxy._get_upstream_session_id() or ""
+
+                # #30: after a successful token refresh, invalidate the
+                # cached upstream session so the NEXT MCP call re-runs
+                # initialize with the fresh token. Runs AFTER the
+                # fallback_session_id update above so the retry response's
+                # own session header doesn't immediately re-prime the cache
+                # with the old-server session. This is atomic against other
+                # recovery operations because `_set_upstream_session_id`
+                # serialises on `_recover_cond`.
+                if stale_token_refreshed and is_streamable:
+                    proxy._set_upstream_session_id(None)
 
                 self.send_response(status)
                 self._send_response_headers(

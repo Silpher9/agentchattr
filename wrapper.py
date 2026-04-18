@@ -711,20 +711,28 @@ def main():
         with _identity_lock:
             old_name = _identity["name"]
             old_token = _identity["token"]
-            changed = False
-            if new_name and new_name != old_name:
+            name_changed = bool(new_name and new_name != old_name)
+            token_changed = bool(new_token and new_token != old_token)
+            if name_changed:
                 _identity["name"] = new_name
                 _identity["queue"] = data_dir / f"{new_name}_queue.jsonl"
-                changed = True
-            if new_token and new_token != old_token:
+            if token_changed:
                 _identity["token"] = new_token
-                changed = True
+            changed = name_changed or token_changed
             current_name = _identity["name"]
             current_token = _identity["token"]
 
         if changed and proxy is not None:
             proxy.agent_name = current_name
             proxy.token = current_token
+            if token_changed:
+                # #30: when the token rotates (typically after a heartbeat-409
+                # triggered re-register), the cached upstream session may
+                # belong to a server instance that has since been restarted
+                # or revoked the pairing. Drop the cached session_id so the
+                # next MCP call drives a fresh re-init alongside the new
+                # token.
+                proxy._set_upstream_session_id(None)
         if changed:
             if new_name and new_name != old_name:
                 print(f"  Identity updated: {old_name} -> {new_name}")
