@@ -38,6 +38,28 @@ class RouterMentionTests(unittest.TestCase):
         self.assertEqual(router.parse_mentions("@telegram-bot check"), [])
         self.assertEqual(router.get_targets("ben", "@telegram-bot check"), [])
 
+    def test_fork_regression_hyphenated_mention_parses_without_truncation(self):
+        # Fork regression guard for WP1 adoption of upstream 41fa636: confirm
+        # the hyphenated-handle parsing change survives re-application on
+        # our fork's router.py state and doesn't regress the boundary
+        # behaviour (no false prefix match, no truncation of valid handle,
+        # no false-positive on trailing hyphen or word-char).
+        router = Router(["telegram", "telegram-bridge"], default_mention="none")
+        # Valid full handle must be captured exactly, not truncated to prefix
+        self.assertEqual(
+            set(router.parse_mentions("heads-up: @telegram-bridge, please ack")),
+            {"telegram-bridge"},
+        )
+        # Trailing punctuation still allows the match
+        self.assertEqual(
+            set(router.parse_mentions("@telegram-bridge!")),
+            {"telegram-bridge"},
+        )
+        # Followed by another word char (no hyphen) must not match either handle
+        self.assertEqual(router.parse_mentions("@telegrambridgex"), [])
+        # Followed by another hyphen-word must not match either handle
+        self.assertEqual(router.parse_mentions("@telegram-bridge-extra"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

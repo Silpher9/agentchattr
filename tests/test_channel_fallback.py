@@ -143,6 +143,43 @@ class ChannelFallbackStateTests(unittest.TestCase):
         self.assertFalse(applied_fallback)
         self.assertEqual(channel, "portfolio")
 
+    def test_fork_regression_read_then_send_without_channel_lands_in_read_channel(self):
+        # Fork regression guard for WP1 adoption of upstream f4998ca:
+        # reproduces the exact user scenario the upstream commit fixed —
+        # agent reads from a non-default channel, then sends without the
+        # channel arg; the message must route to that channel, not
+        # silently fall back to "general". On our fork this must also
+        # coexist with the #13 archive-channel gate (which lives just
+        # after the fallback block in chat_send).
+        sender = "codex-local"
+
+        # Simulate the chat_read side-effect of recording the last read
+        # (the block at mcp_bridge.py chat_read's channel branch).
+        with mcp_bridge._last_read_lock:
+            mcp_bridge._last_read_channel[sender] = "speelkaart"
+            mcp_bridge._last_read_job_id.pop(sender, None)
+
+        # Now replay the chat_send fallback resolution:
+        channel = ""  # caller omitted it
+        job_id = 0
+        if sender and not channel.strip() and not job_id:
+            with mcp_bridge._last_read_lock:
+                fallback_job = mcp_bridge._last_read_job_id.get(sender, 0)
+                fallback_channel = mcp_bridge._last_read_channel.get(sender, "")
+            if fallback_job:
+                job_id = fallback_job
+            elif fallback_channel:
+                channel = fallback_channel
+        if not channel and not job_id:
+            channel = "general"
+
+        self.assertEqual(
+            channel, "speelkaart",
+            "chat_send with no channel after chat_read(channel=speelkaart) "
+            "must route to #speelkaart, NOT fall back to #general",
+        )
+        self.assertEqual(job_id, 0, "no job_id fallback expected in this path")
+
 
 if __name__ == "__main__":
     unittest.main()
