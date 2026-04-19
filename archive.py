@@ -490,11 +490,12 @@ def _do_import(zip_bytes, store, jobs_store, rules_store,
                         old_jid = m["metadata"].get("job_id")
                         if old_jid in _job_id_remap:
                             m["metadata"]["job_id"] = _job_id_remap[old_jid]
-                # Pre-existing bug fix (surfaced by #13 work): the
-                # MessageStore has no _save() method — its persistence
-                # is _rewrite_jsonl(). The previous call crashed the
-                # round-trip import test on clean main before any
-                # #13 changes landed.
+                # Pre-existing bug fix (surfaced by #13 work and independently
+                # by upstream 41fa636): MessageStore has no _save() method, so
+                # the prior call crashed the round-trip import test. Our fork
+                # and upstream landed the equivalent fix in parallel — we keep
+                # the JSONL-explicit alias since our #13 archive path already
+                # exercises it.
                 store._rewrite_jsonl()
     report["sections"]["jobs"] = job_report
 
