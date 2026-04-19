@@ -143,6 +143,33 @@ class ChannelFallbackStateTests(unittest.TestCase):
         self.assertFalse(applied_fallback)
         self.assertEqual(channel, "portfolio")
 
+    def test_migrate_identity_moves_last_read_job_id(self):
+        # codex2 blocker on PR #36: WP1 added _last_read_job_id but
+        # migrate_identity only migrated _last_read_channel, leaving
+        # stale job-fallback state under the old name after a rename.
+        # This test pins the lifecycle fix so the gap doesn't reopen.
+        mcp_bridge._last_read_job_id["old-name"] = 42
+        mcp_bridge.migrate_identity("old-name", "new-name")
+        self.assertNotIn(
+            "old-name", mcp_bridge._last_read_job_id,
+            "migrate_identity must remove the old-name entry",
+        )
+        self.assertEqual(
+            mcp_bridge._last_read_job_id.get("new-name"), 42,
+            "migrate_identity must transfer the job_id under the new name",
+        )
+
+    def test_purge_identity_removes_last_read_job_id(self):
+        # codex2 blocker on PR #36: purge_identity also skipped
+        # _last_read_job_id, so a deregistered agent could resurrect its
+        # job fallback if its name was reused later.
+        mcp_bridge._last_read_job_id["agent"] = 99
+        mcp_bridge.purge_identity("agent")
+        self.assertNotIn(
+            "agent", mcp_bridge._last_read_job_id,
+            "purge_identity must drop the job-fallback state",
+        )
+
     def test_fork_regression_read_then_send_without_channel_lands_in_read_channel(self):
         # Fork regression guard for WP1 adoption of upstream f4998ca:
         # reproduces the exact user scenario the upstream commit fixed —

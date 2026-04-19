@@ -531,6 +531,12 @@ def migrate_identity(old_name: str, new_name: str):
             _cursors[new_name] = _cursors.pop(old_name)
         if old_name in _last_read_channel:
             _last_read_channel[new_name] = _last_read_channel.pop(old_name)
+    # Also migrate the chat_send last-read-job fallback state added by
+    # WP1 / upstream f4998ca so stale job fallbacks don't leak after a
+    # rename and rehydrate under the wrong identity.
+    with _last_read_lock:
+        if old_name in _last_read_job_id:
+            _last_read_job_id[new_name] = _last_read_job_id.pop(old_name)
     if old_name in _roles:
         _roles[new_name] = _roles.pop(old_name)
         _save_roles()
@@ -546,6 +552,10 @@ def purge_identity(name: str):
     with _cursors_lock:
         _cursors.pop(name, None)
         _last_read_channel.pop(name, None)
+    # Mirror cleanup for the chat_send last-read-job fallback state so a
+    # purged identity can't resurrect its job-routing after name reuse.
+    with _last_read_lock:
+        _last_read_job_id.pop(name, None)
     if name in _roles:
         del _roles[name]
         _save_roles()
