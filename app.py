@@ -2273,24 +2273,39 @@ async def delete_job(job_id: int, request: Request):
 
 
 @app.get("/api/roles")
-async def get_roles():
-    """Get all agent roles."""
+async def get_roles(request: Request):
+    """Get agent roles (#37 channel-scoped).
+
+    - `GET /api/roles` → full nested `{name: {channel: role}}` map.
+    - `GET /api/roles?channel=X` → flat `{name: role}` map for channel X,
+      with the `__default__` fallback applied per agent. Consumers that
+      predate the channel-scoped feature can keep using this flat shape
+      by passing the current channel explicitly.
+    """
     import mcp_bridge
+    channel = request.query_params.get("channel")
+    if channel is not None:
+        return mcp_bridge.get_roles_for_channel(channel)
     return mcp_bridge.get_all_roles()
 
 
 @app.post("/api/roles/{agent_name}")
 async def set_agent_role(agent_name: str, request: Request):
-    """Set or clear an agent's role."""
+    """Set or clear an agent's role for a given channel (#37).
+
+    Query param `?channel=X` scopes the change to that channel; omit it
+    to write to the `__default__` fallback bucket so the role applies in
+    every channel without a specific override."""
     import mcp_bridge
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"error": "invalid json"}, status_code=400)
     role = body.get("role", "").strip()
-    mcp_bridge.set_role(agent_name, role)
+    channel = request.query_params.get("channel")
+    mcp_bridge.set_role(agent_name, role, channel=channel)
     await broadcast_status()
-    return JSONResponse({"ok": True, "role": role})
+    return JSONResponse({"ok": True, "role": role, "channel": channel or "__default__"})
 
 
 # --- Rules API ---

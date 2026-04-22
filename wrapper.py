@@ -443,16 +443,42 @@ _IDENTITY_HINT = (
 )
 
 
-def _fetch_role(server_port: int, agent_name: str) -> str:
-    """Fetch this agent's role from the server status endpoint."""
+def _fetch_role(server_port: int, agent_name: str, channel: str = "") -> str:
+    """Fetch this agent's role for a given channel (#37).
+
+    Prefers the channel-scoped endpoint (`/api/roles?channel=X`) when a
+    channel is provided, so the wrapper injection uses the right role per
+    triggering channel. Falls back to the unfiltered endpoint and treats
+    both the new nested and the legacy flat shape correctly, so this
+    wrapper works against old agentchattr servers that predate #37.
+    """
+    import urllib.parse
+    import urllib.request
+    query = f"?channel={urllib.parse.quote(channel)}" if channel else ""
+    url = f"http://127.0.0.1:{server_port}/api/roles{query}"
     try:
-        import urllib.request
-        req = urllib.request.Request(f"http://127.0.0.1:{server_port}/api/roles")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            roles = json.loads(resp.read())
-        return roles.get(agent_name, "")
+        with urllib.request.urlopen(url, timeout=3) as resp:
+            raw = json.loads(resp.read())
     except Exception:
         return ""
+    if not isinstance(raw, dict):
+        return ""
+    value = raw.get(agent_name)
+    if isinstance(value, str):
+        # Flat response: either the channel-scoped endpoint, or a legacy
+        # server returning `{name: role}`. Either way the string is the
+        # role this agent should use.
+        return value
+    if isinstance(value, dict):
+        # Nested response from a new server when no channel filter was
+        # sent. Apply the same precedence the server itself uses.
+        key = (channel or "").strip().lower() or "__default__"
+        if key in value and isinstance(value[key], str):
+            return value[key]
+        default_role = value.get("__default__")
+        if isinstance(default_role, str):
+            return default_role
+    return ""
 
 
 def _fetch_active_rules(server_port: int, token: str = "", channel: str = "") -> dict | None:
@@ -553,9 +579,9 @@ def _queue_watcher(get_identity_fn, inject_fn, *, is_multi_instance: bool = Fals
                     # Use current identity (may have changed via rename)
                     current_name, _ = get_identity_fn()
                     # Append role if set — check both current name and base name
-                    role = _fetch_role(server_port, current_name)
+                    role = _fetch_role(server_port, current_name, channel=channel)
                     if not role and current_name != agent_name:
-                        role = _fetch_role(server_port, agent_name)
+                        role = _fetch_role(server_port, agent_name, channel=channel)
                     if role:
                         prompt += f"\n\nROLE: {role}"
 
