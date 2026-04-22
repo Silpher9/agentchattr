@@ -16,7 +16,12 @@ class AgentTrigger:
         return self._registry.is_registered(name)
 
     def get_status(self) -> dict:
-        from mcp_bridge import is_online, is_active, get_role
+        # `role` stays a plain string (the __default__ fallback) for
+        # backwards compat with clients that predate #37. `roles` adds
+        # the full `{channel: role}` map so the UI can render channel-
+        # scoped role pills per message.
+        from mcp_bridge import is_online, is_active, get_role, get_all_roles
+        all_roles = get_all_roles()
         instances = self._registry.get_all()
         return {
             name: {
@@ -25,6 +30,7 @@ class AgentTrigger:
                 "label": info["label"],
                 "color": info["color"],
                 "role": get_role(name),
+                "roles": all_roles.get(name, {}),
             }
             for name, info in instances.items()
         }

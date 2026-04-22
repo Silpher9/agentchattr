@@ -878,9 +878,13 @@ function appendMessage(msg) {
 
         const statusLabel = todoStatusLabel(todoStatus);
         el.dataset.rawText = msg.text;
-        const senderRole = _agentRoles[msg.sender] || '';
+        // #37: role pill is scoped to the message's own channel, with the
+        // __default__ role as fallback. Picker opens on the same channel
+        // via data-channel so clicks set the channel-specific role.
+        const msgChannelForRole = msg.channel || 'general';
+        const senderRole = _roleFor(msg.sender, msgChannelForRole);
         const roleClass = senderRole ? 'bubble-role has-role' : 'bubble-role';
-        const rolePillHtml = !isSelf ? `<button class="${roleClass}" onclick="showBubbleRolePicker(this, '${escapeHtml(msg.sender)}')" title="${senderRole ? escapeHtml(senderRole) : 'Set role'}">${senderRole || 'choose a role'}</button>` : '';
+        const rolePillHtml = !isSelf ? `<button class="${roleClass}" data-channel="${escapeHtml(msgChannelForRole)}" onclick="showBubbleRolePicker(this, '${escapeHtml(msg.sender)}', '${escapeHtml(msgChannelForRole)}')" title="${senderRole ? escapeHtml(senderRole) : 'Set role'}">${senderRole || 'choose a role'}</button>` : '';
         // Inline decision choices (if present)
         let choicesHtml = '';
         const meta = msg.metadata || {};
@@ -1384,7 +1388,9 @@ function showPillPopover(pillEl, opts) {
     popover.dataset.agent = opts.name;
     popover.style.setProperty('--agent-color', colorOverrides[opts.name] || opts.color);
 
-    const currentRole = (_agentRoles[opts.name] || '').toLowerCase();
+    // #37: fall back to the __default__ bucket so the status-pill picker
+    // (which is not channel-scoped) still shows a meaningful current role.
+    const currentRole = String(_roleFor(opts.name, '') || '').toLowerCase();
     const roleChipsHtml = ROLE_PRESETS.map(p =>
         `<button class="role-preset-chip pill-role-chip ${currentRole === p.label.toLowerCase() ? 'active' : ''}" data-role="${escapeHtml(p.label)}">${p.emoji} ${escapeHtml(p.label)}</button>`
     ).join('');
@@ -1630,7 +1636,7 @@ function showPillPopover(pillEl, opts) {
 
 // --- Bubble role picker ---
 
-function showBubbleRolePicker(btn, agentName) {
+function showBubbleRolePicker(btn, agentName, channel) {
     // Close any existing picker and reset z-index on its parent message
     document.querySelectorAll('.bubble-role-picker').forEach(p => {
         const msg = p.closest('.message');
@@ -1638,7 +1644,8 @@ function showBubbleRolePicker(btn, agentName) {
         p.remove();
     });
 
-    const currentRole = (_agentRoles[agentName] || '').toLowerCase();
+    const effectiveChannel = channel || btn?.dataset?.channel || 'general';
+    const currentRole = String(_roleFor(agentName, effectiveChannel) || '').toLowerCase();
     const picker = document.createElement('div');
     picker.className = 'bubble-role-picker';
     const closePicker = () => { if (msgEl) msgEl.style.zIndex = ''; picker.remove(); };
@@ -1647,14 +1654,14 @@ function showBubbleRolePicker(btn, agentName) {
     const noneChip = document.createElement('button');
     noneChip.className = 'role-preset-chip' + (!currentRole ? ' active' : '');
     noneChip.textContent = 'None';
-    noneChip.addEventListener('click', () => { _setRole(agentName, ''); closePicker(); });
+    noneChip.addEventListener('click', () => { _setRole(agentName, '', effectiveChannel); closePicker(); });
     picker.appendChild(noneChip);
 
     for (const preset of ROLE_PRESETS) {
         const chip = document.createElement('button');
         chip.className = 'role-preset-chip' + (currentRole === preset.label.toLowerCase() ? ' active' : '');
         chip.textContent = `${preset.emoji} ${preset.label}`;
-        chip.addEventListener('click', () => { _setRole(agentName, preset.label); closePicker(); });
+        chip.addEventListener('click', () => { _setRole(agentName, preset.label, effectiveChannel); closePicker(); });
         picker.appendChild(chip);
     }
 
@@ -1664,7 +1671,7 @@ function showBubbleRolePicker(btn, agentName) {
         const chip = document.createElement('button');
         chip.className = 'role-preset-chip' + (currentRole === r.toLowerCase() ? ' active' : '');
         chip.textContent = r;
-        chip.addEventListener('click', () => { _setRole(agentName, r); closePicker(); });
+        chip.addEventListener('click', () => { _setRole(agentName, r, effectiveChannel); closePicker(); });
         picker.appendChild(chip);
     }
 
@@ -1679,7 +1686,7 @@ function showBubbleRolePicker(btn, agentName) {
     customInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') {
             const val = customInput.value.trim();
-            if (val) { _setRole(agentName, val); closePicker(); }
+            if (val) { _setRole(agentName, val, effectiveChannel); closePicker(); }
             e.preventDefault();
         }
         if (e.key === 'Escape') { closePicker(); }
@@ -1728,27 +1735,54 @@ function showBubbleRolePicker(btn, agentName) {
     }, 0);
 }
 
+// #37: defensive role lookup that survives legacy cached state after upgrade
+// (roles[agent] may be a plain string from an older server) and gives
+// `__default__` as fallback when the requested channel has no explicit role.
+function _roleFor(agentName, channel) {
+    const bucket = _agentRoles[agentName];
+    if (!bucket) return '';
+    if (typeof bucket === 'string') return bucket;  // legacy flat shape
+    const key = (channel || '').trim().toLowerCase() || '__default__';
+    return bucket[key] || bucket['__default__'] || '';
+}
+
 function _syncBubbleRolePills(agentName) {
-    const role = String(_agentRoles[agentName] || '').trim();
-    const pillText = role || 'choose a role';
     document.querySelectorAll('.message').forEach(msg => {
         const senderEl = msg.querySelector('.msg-sender');
         const btn = msg.querySelector('.bubble-role');
         if (!btn || !senderEl || senderEl.textContent !== agentName) return;
-        btn.textContent = pillText;
+        const channel = btn.dataset.channel || 'general';
+        const role = String(_roleFor(agentName, channel) || '').trim();
+        btn.textContent = role || 'choose a role';
         btn.title = role || 'Set role';
         btn.classList.toggle('has-role', !!role);
     });
 }
 
-function _setRole(agentName, role) {
-    fetch(`/api/roles/${agentName}`, {
+function _setRole(agentName, role, channel) {
+    const effectiveChannel = (channel || '').trim();
+    const url = effectiveChannel
+        ? `/api/roles/${agentName}?channel=${encodeURIComponent(effectiveChannel)}`
+        : `/api/roles/${agentName}`;
+    fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Session-Token': SESSION_TOKEN },
         body: JSON.stringify({ role }),
     });
-    // Optimistic update
-    _agentRoles[agentName] = role;
+    // Optimistic update in the nested local cache so the pill re-renders
+    // without waiting for a WebSocket status broadcast.
+    const key = effectiveChannel ? effectiveChannel.toLowerCase() : '__default__';
+    if (typeof _agentRoles[agentName] !== 'object' || _agentRoles[agentName] === null) {
+        _agentRoles[agentName] = {};
+    }
+    if (role) {
+        _agentRoles[agentName][key] = role;
+    } else {
+        delete _agentRoles[agentName][key];
+        if (Object.keys(_agentRoles[agentName]).length === 0) {
+            delete _agentRoles[agentName];
+        }
+    }
     _syncBubbleRolePills(agentName);
     // If custom role (not in presets), auto-save it
     if (role && !ROLE_PRESETS.some(p => p.label.toLowerCase() === role.toLowerCase())) {
@@ -1774,17 +1808,30 @@ function _deleteCustomRole(role) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'update_settings', data: { custom_roles: updated } }));
     }
-    // Unassign from any agents currently using this role
-    for (const [agentName, agentRole] of Object.entries(_agentRoles)) {
-        if (agentRole && agentRole.toLowerCase() === lower) {
-            _setRole(agentName, '');
+    // Unassign from any agents currently using this role in any channel
+    // (#37: walk the nested structure so channel-scoped roles are cleared
+    // everywhere the deleted custom role was in use, not just globally).
+    for (const [agentName, bucket] of Object.entries(_agentRoles)) {
+        if (!bucket) continue;
+        if (typeof bucket === 'string') {
+            if (bucket.toLowerCase() === lower) _setRole(agentName, '');
+            continue;
+        }
+        for (const [channel, agentRole] of Object.entries(bucket)) {
+            if (agentRole && String(agentRole).toLowerCase() === lower) {
+                const writeChannel = channel === '__default__' ? '' : channel;
+                _setRole(agentName, '', writeChannel);
+            }
         }
     }
 }
 
 // --- Status ---
 
-const _agentRoles = {};  // name → role string
+// #37: _agentRoles is now nested — { agentName: { channelKey: role } }.
+// __default__ is the fallback bucket for "set once, applies everywhere"
+// legacy behaviour.
+const _agentRoles = {};
 
 function fetchRoles() {
     fetch('/api/roles').then(r => r.json()).then(roles => {
@@ -1830,9 +1877,17 @@ function updateStatus(data) {
             if (info.color) presence.style.setProperty('--agent-color', info.color);
         }
 
-        // Track role (displayed on bubbles, not on pill)
-        if (info.role !== undefined) {
-            _agentRoles[name] = info.role;
+        // Track role (displayed on bubbles, not on pill).
+        // #37: `roles` carries the full `{channel: role}` map; `role` is
+        // kept for backwards compat and collapses to __default__. Prefer
+        // the nested map so channel-scoped pills render correctly.
+        if (info.roles && typeof info.roles === 'object') {
+            _agentRoles[name] = info.roles;
+            _syncBubbleRolePills(name);
+        } else if (info.role !== undefined) {
+            _agentRoles[name] = info.role
+                ? { __default__: info.role }
+                : {};
             _syncBubbleRolePills(name);
         }
     }

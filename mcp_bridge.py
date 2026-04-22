@@ -46,9 +46,28 @@ _last_read_job_id: dict[str, int] = {}
 _last_read_lock = threading.Lock()
 PRESENCE_TIMEOUT = 30  # ~6 missed heartbeats (5s interval) = offline
 
-# Roles — per-instance, persisted to roles.json
-_roles: dict[str, str] = {}  # agent_name → role string
+# Roles — channel-scoped per agent instance, persisted to roles.json (#37).
+# Shape: { agent_name: { channel_key: role_string } }
+# The `_DEFAULT_ROLE_CHANNEL` pseudo-channel holds the fallback role that
+# applies when no channel-specific role is set; it's also where legacy flat
+# roles.json entries migrate to on first load, preserving the old
+# "set once, applies everywhere" behaviour without silent data loss.
+_DEFAULT_ROLE_CHANNEL = "__default__"
+_roles: dict[str, dict[str, str]] = {}
+_roles_lock = threading.Lock()
 _ROLES_FILE: Path | None = None
+
+
+def _normalise_channel_key(channel: str | None) -> str:
+    """Canonicalise channel identifiers for role lookup/write.
+
+    Strip + lower-case so `Speelkaart`, `speelkaart` and `speelkaart ` all
+    collide on the same bucket. An empty / None channel falls through to
+    the `_DEFAULT_ROLE_CHANNEL` bucket."""
+    if not channel:
+        return _DEFAULT_ROLE_CHANNEL
+    normalised = channel.strip().lower()
+    return normalised or _DEFAULT_ROLE_CHANNEL
 
 # Cursor persistence — set by run.py to enable saving cursors across restarts
 _CURSORS_FILE: Path | None = None
@@ -474,14 +493,47 @@ def _save_cursors():
 
 
 def _load_roles():
-    """Load persisted roles from disk."""
+    """Load persisted roles from disk and migrate legacy flat shape to the
+    channel-scoped nested shape in one idempotent step (#37)."""
     global _roles
     if _ROLES_FILE is None or not _ROLES_FILE.exists():
         return
     try:
-        _roles = json.loads(_ROLES_FILE.read_text("utf-8"))
+        raw = json.loads(_ROLES_FILE.read_text("utf-8"))
     except Exception:
         log.warning("Failed to load roles from %s", _ROLES_FILE)
+        return
+    if not isinstance(raw, dict):
+        log.warning("roles.json root is not an object; ignoring")
+        return
+    migrated: dict[str, dict[str, str]] = {}
+    needs_save = False
+    for name, value in raw.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if isinstance(value, str):
+            # Legacy flat shape: { name: "role" } → { name: { __default__: "role" } }
+            if value:
+                migrated[name] = {_DEFAULT_ROLE_CHANNEL: value}
+            needs_save = True
+        elif isinstance(value, dict):
+            bucket: dict[str, str] = {}
+            for channel, role_str in value.items():
+                if not isinstance(role_str, str) or not role_str:
+                    continue
+                key = _normalise_channel_key(channel if isinstance(channel, str) else None)
+                # If normalisation collapsed multiple keys onto the same
+                # bucket (e.g. "Speelkaart" and "speelkaart"), last-write-
+                # wins matches JSON.parse semantics and is reproducible.
+                bucket[key] = role_str
+                if key != channel:
+                    needs_save = True
+            if bucket:
+                migrated[name] = bucket
+    with _roles_lock:
+        _roles = migrated
+    if needs_save:
+        _save_roles()
 
 
 def _save_roles():
@@ -490,30 +542,73 @@ def _save_roles():
         return
     try:
         _ROLES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with _roles_lock:
+            snapshot = {name: dict(channels) for name, channels in _roles.items()}
         tmp = _ROLES_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(_roles), "utf-8")
+        tmp.write_text(json.dumps(snapshot), "utf-8")
         os.replace(tmp, _ROLES_FILE)
     except Exception:
         log.warning("Failed to save roles to %s", _ROLES_FILE)
 
 
-def set_role(name: str, role: str):
-    """Set or clear an agent's role. Empty string clears."""
-    if role:
-        _roles[name] = role
-    else:
-        _roles.pop(name, None)
+def set_role(name: str, role: str, channel: str | None = None):
+    """Set or clear an agent's role for a given channel (#37).
+
+    `channel=None` or an empty string writes to the `__default__` fallback
+    bucket so a role set from the legacy "global" code path still applies
+    where no channel-specific role exists. Passing an empty `role` clears
+    the role for that channel only; the agent's other channel roles are
+    left untouched. Thread-safe via `_roles_lock`."""
+    key = _normalise_channel_key(channel)
+    with _roles_lock:
+        old_role = _roles.get(name, {}).get(key, "")
+        if role:
+            _roles.setdefault(name, {})[key] = role
+        else:
+            bucket = _roles.get(name)
+            if bucket and key in bucket:
+                del bucket[key]
+                if not bucket:
+                    del _roles[name]
+    log.info(
+        "role change: agent=%s channel=%s old=%r new=%r",
+        name, key, old_role, role,
+    )
     _save_roles()
 
 
-def get_role(name: str) -> str:
-    """Get an agent's current role, or empty string."""
-    return _roles.get(name, "")
+def get_role(name: str, channel: str | None = None) -> str:
+    """Return the most specific role for (name, channel), with `__default__`
+    as fallback (#37). Returns empty string when no role is set at all."""
+    key = _normalise_channel_key(channel)
+    with _roles_lock:
+        bucket = _roles.get(name)
+        if not bucket:
+            return ""
+        if key in bucket:
+            return bucket[key]
+        return bucket.get(_DEFAULT_ROLE_CHANNEL, "")
 
 
-def get_all_roles() -> dict[str, str]:
-    """All active roles."""
-    return dict(_roles)
+def get_all_roles() -> dict[str, dict[str, str]]:
+    """Return the full nested roles map, copied so callers can't mutate
+    internal state (#37)."""
+    with _roles_lock:
+        return {name: dict(channels) for name, channels in _roles.items()}
+
+
+def get_roles_for_channel(channel: str | None = None) -> dict[str, str]:
+    """Return a flat `{name: role}` map scoped to a single channel, with
+    `__default__` fallback applied per agent. Powers the UI's channel-
+    specific role pill rendering and the wrapper's channel-aware fetch."""
+    key = _normalise_channel_key(channel)
+    with _roles_lock:
+        out: dict[str, str] = {}
+        for name, bucket in _roles.items():
+            role = bucket.get(key) or bucket.get(_DEFAULT_ROLE_CHANNEL, "")
+            if role:
+                out[name] = role
+        return out
 
 
 def migrate_identity(old_name: str, new_name: str):
@@ -537,8 +632,11 @@ def migrate_identity(old_name: str, new_name: str):
     with _last_read_lock:
         if old_name in _last_read_job_id:
             _last_read_job_id[new_name] = _last_read_job_id.pop(old_name)
-    if old_name in _roles:
-        _roles[new_name] = _roles.pop(old_name)
+    with _roles_lock:
+        role_moved = old_name in _roles
+        if role_moved:
+            _roles[new_name] = _roles.pop(old_name)
+    if role_moved:
         _save_roles()
     _save_cursors()
 
@@ -556,8 +654,9 @@ def purge_identity(name: str):
     # purged identity can't resurrect its job-routing after name reuse.
     with _last_read_lock:
         _last_read_job_id.pop(name, None)
-    if name in _roles:
-        del _roles[name]
+    with _roles_lock:
+        role_removed = _roles.pop(name, None) is not None
+    if role_removed:
         _save_roles()
     _save_cursors()
 
