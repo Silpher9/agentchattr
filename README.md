@@ -481,6 +481,44 @@ The wrapper registers with the server, watches for @mentions, reads recent chat 
 
 Available models: `MiniMax-M2.7` (default), `MiniMax-M2.7-highspeed` (faster), `MiniMax-M2.5`, `MiniMax-M2.5-highspeed`. China mainland users can change `base_url` to `https://api.minimaxi.com/v1` in `config.toml`.
 
+### OpenRouter (cloud API, multi-model gateway)
+
+[OpenRouter](https://openrouter.ai) exposes hundreds of models — Qwen, DeepSeek, Mistral, Anthropic, etc. — through a single OpenAI-compatible endpoint. Add as many as you want as separate API agents in `config.local.toml`:
+
+1. Get an API key at [openrouter.ai](https://openrouter.ai)
+
+2. Set the environment variable:
+   ```bash
+   export OPENROUTER_API_KEY=your-key-here
+   ```
+
+3. Add an agent block in `config.local.toml` for each model you want. The agent name is the local handle you'll @-mention; `model` is the OpenRouter slug:
+   ```toml
+   [agents.qwen3]
+   type = "api"
+   base_url = "https://openrouter.ai/api/v1"
+   model = "qwen/qwen3.6-plus"
+   color = "#7c3aed"
+   label = "Qwen3"
+   api_key_env = "OPENROUTER_API_KEY"
+
+   [agents.deepseek]
+   type = "api"
+   base_url = "https://openrouter.ai/api/v1"
+   model = "deepseek/deepseek-v4-pro"
+   color = "#4d6bfe"
+   label = "DeepSeek"
+   api_key_env = "OPENROUTER_API_KEY"
+   ```
+
+4. Launch:
+   ```bash
+   python wrapper_api.py qwen3
+   python wrapper_api.py deepseek
+   ```
+
+Each agent gets its own status pill, @mention routing, and queue — pick any model slug from [openrouter.ai/models](https://openrouter.ai/models).
+
 ## Architecture
 
 ```

@@ -52,3 +52,25 @@
 # label = "MiniMax"
 # api_key_env = "MINIMAX_API_KEY"
 # temperature = 1.0
+
+# --- Example: OpenRouter (cloud API, multi-model gateway) ---
+# OpenRouter exposes hundreds of models through a single OpenAI-compatible endpoint.
+# Get an API key at https://openrouter.ai and set OPENROUTER_API_KEY in your environment.
+# Pick any model from https://openrouter.ai/models — the agent name (e.g. `qwen3`,
+# `deepseek`) is just the local handle you'll @-mention; `model` is the OpenRouter slug.
+#
+# [agents.qwen3]
+# type = "api"
+# base_url = "https://openrouter.ai/api/v1"
+# model = "qwen/qwen3.6-plus"
+# color = "#7c3aed"
+# label = "Qwen3"
+# api_key_env = "OPENROUTER_API_KEY"
+#
+# [agents.deepseek]
+# type = "api"
+# base_url = "https://openrouter.ai/api/v1"
+# model = "deepseek/deepseek-v4-pro"
+# color = "#4d6bfe"
+# label = "DeepSeek"
+# api_key_env = "OPENROUTER_API_KEY"
